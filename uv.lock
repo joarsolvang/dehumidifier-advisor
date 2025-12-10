@@ -505,6 +505,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
+    { name = "matplotlib" },
     { name = "polars" },
     { name = "pydantic" },
 ]
@@ -522,13 +523,13 @@ jupyter-notebooks = [
     { name = "jupyter" },
 ]
 plotting = [
-    { name = "matplotlib" },
     { name = "plotly" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "matplotlib", specifier = ">=3.10.7" },
     { name = "polars", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
 ]
@@ -543,10 +544,7 @@ dev = [
     { name = "ruff", specifier = ">=0.11.0" },
 ]
 jupyter-notebooks = [{ name = "jupyter", specifier = ">=1.0.0" }]
-plotting = [
-    { name = "matplotlib", specifier = ">=3.10.7" },
-    { name = "plotly", specifier = ">=6.5.0" },
-]
+plotting = [{ name = "plotly", specifier = ">=6.5.0" }]
 
 [[package]]
 name = "deptry"
