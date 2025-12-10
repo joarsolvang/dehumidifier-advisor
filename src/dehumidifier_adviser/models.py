@@ -3,6 +3,7 @@
 from datetime import datetime
 from typing import ClassVar
 
+import polars as pl
 from pydantic import BaseModel, Field
 
 
@@ -13,6 +14,23 @@ class HourlyHumidityData(BaseModel):
     relative_humidity_2m: list[float] | None = Field(None, description="Relative humidity at 2m above ground (%)")
     dew_point_2m: list[float] | None = Field(None, description="Dew point temperature at 2m (°C)")
     vapour_pressure_deficit: list[float] | None = Field(None, description="Vapour Pressure Deficit (VPD) in kPa")
+
+    def to_dataframe(self) -> pl.DataFrame:
+        """Convert hourly data to a Polars DataFrame.
+
+        Returns:
+            Polars DataFrame with hourly humidity data
+        """
+        data: dict[str, list[datetime] | list[float] | None] = {"time": self.time}
+
+        if self.relative_humidity_2m is not None:
+            data["relative_humidity_2m"] = self.relative_humidity_2m
+        if self.dew_point_2m is not None:
+            data["dew_point_2m"] = self.dew_point_2m
+        if self.vapour_pressure_deficit is not None:
+            data["vapour_pressure_deficit"] = self.vapour_pressure_deficit
+
+        return pl.DataFrame(data)
 
 
 class DailyHumidityData(BaseModel):
@@ -25,6 +43,29 @@ class DailyHumidityData(BaseModel):
     dew_point_2m_mean: list[float] | None = Field(None, description="Mean daily dew point at 2m (°C)")
     dew_point_2m_max: list[float] | None = Field(None, description="Maximum daily dew point at 2m (°C)")
     dew_point_2m_min: list[float] | None = Field(None, description="Minimum daily dew point at 2m (°C)")
+
+    def to_dataframe(self) -> pl.DataFrame:
+        """Convert daily data to a Polars DataFrame.
+
+        Returns:
+            Polars DataFrame with daily humidity data
+        """
+        data: dict[str, list[datetime] | list[float] | None] = {"time": self.time}
+
+        if self.relative_humidity_2m_mean is not None:
+            data["relative_humidity_2m_mean"] = self.relative_humidity_2m_mean
+        if self.relative_humidity_2m_max is not None:
+            data["relative_humidity_2m_max"] = self.relative_humidity_2m_max
+        if self.relative_humidity_2m_min is not None:
+            data["relative_humidity_2m_min"] = self.relative_humidity_2m_min
+        if self.dew_point_2m_mean is not None:
+            data["dew_point_2m_mean"] = self.dew_point_2m_mean
+        if self.dew_point_2m_max is not None:
+            data["dew_point_2m_max"] = self.dew_point_2m_max
+        if self.dew_point_2m_min is not None:
+            data["dew_point_2m_min"] = self.dew_point_2m_min
+
+        return pl.DataFrame(data)
 
 
 class HumidityForecast(BaseModel):
