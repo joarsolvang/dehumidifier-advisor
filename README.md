@@ -6,7 +6,6 @@ _Put your project description here_
 ## Usage
 Provide a description of the project here. If the project is intended to be distributed as a package, include instructions on how the package should be installed and used.
 
-To use this template, simply rename `example-pkg` and `example_pkg` to the name of your choice, including everywhere in `pyproject.toml`.
 
 ## Development
 The development environment should be created and managed using [uv](https://docs.astral.sh/uv/). To create the environment:
