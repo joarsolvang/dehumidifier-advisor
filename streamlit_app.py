@@ -167,41 +167,35 @@ def plot_daily_humidity(forecast: HumidityForecast) -> None:
 
 def main() -> None:
     """Main Streamlit application."""
+    # Add custom CSS for sticky header
+    st.markdown(
+        """
+        <style>
+        /* Make title sticky */
+        [data-testid="stHeader"] {
+            position: sticky;
+            top: 0;
+            z-index: 999;
+            background-color: white;
+        }
+        /* Add slight shadow to sticky header */
+        [data-testid="stHeader"]::after {
+            content: "";
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(to bottom, rgba(0,0,0,0.1), transparent);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     # Header
     st.title("🌧️ Dehumidifier Advisor Dashboard")
     st.markdown("Get humidity forecasts for any location worldwide")
-
-    # Sidebar settings
-    with st.sidebar:
-        st.header("⚙️ Forecast Settings")
-
-        forecast_days = st.slider(
-            "Forecast Duration (days)",
-            min_value=1,
-            max_value=16,
-            value=7,
-            help="Number of days to forecast (API limit: 1-16)",
-        )
-
-        view_mode = st.radio(
-            "View Mode",
-            options=["Hourly", "Daily"],
-            index=0,
-            help="Toggle between hourly and daily forecast views",
-        )
-
-        st.divider()
-        st.markdown("### About")
-        st.markdown(
-            """
-            This dashboard uses:
-            - **OpenStreetMap Nominatim** for geocoding
-            - **Open-Meteo API** for weather forecasts
-            - **Relative Humidity (%)** as the primary metric
-
-            Data is cached to improve performance and respect API rate limits.
-            """
-        )
 
     # Location input form
     with st.form("location_form"):
@@ -236,34 +230,57 @@ def main() -> None:
             with st.spinner("🌍 Finding location..."):
                 location = get_location_cached(loc_input["city"], loc_input["country"], loc_input["state"])
 
-            # Display map
-            st.subheader("📍 Location")
-            map_data = pd.DataFrame({"lat": [location.latitude], "lon": [location.longitude]})
-            st.map(map_data, zoom=10)
+            # Display map and current conditions side by side
+            map_col, conditions_col = st.columns(2)
 
-            # Current conditions
-            st.subheader("💧 Current Conditions")
-            col1, col2, col3 = st.columns(3)
+            with map_col:
+                st.subheader("📍 Location")
+                map_data = pd.DataFrame({"lat": [location.latitude], "lon": [location.longitude]})
+                st.map(map_data, zoom=10)
 
-            with col1:
+            with conditions_col:
+                st.subheader("💧 Current Conditions")
+
                 with st.spinner("Loading current conditions..."):
                     current = get_current_humidity_cached(location.latitude, location.longitude)
                 humidity = current.get("relative_humidity_2m", "N/A")
+
+                # Display humidity metric prominently
                 st.metric("Relative Humidity", f"{humidity}%" if humidity != "N/A" else "N/A")
 
-            with col2:
+                # Location details
                 st.write(f"**Location:** {location.city}, {location.country}")
                 if location.state:
                     st.write(f"**Region:** {location.state}")
 
-            with col3:
-                st.write("**Coordinates:**")
-                st.write(f"Lat: {location.latitude:.4f}")
-                st.write(f"Lon: {location.longitude:.4f}")
+                # Coordinates
+                st.write(f"**Coordinates:** {location.latitude:.4f}, {location.longitude:.4f}")
 
-            # Forecast
+            # Forecast section with settings
             st.subheader("📊 Humidity Forecast")
 
+            # Forecast settings (moved from sidebar)
+            settings_col1, settings_col2 = st.columns([2, 1])
+
+            with settings_col1:
+                forecast_days = st.slider(
+                    "Forecast Duration (days)",
+                    min_value=1,
+                    max_value=16,
+                    value=7,
+                    help="Number of days to forecast (API limit: 1-16)",
+                )
+
+            with settings_col2:
+                view_mode = st.radio(
+                    "View Mode",
+                    options=["Hourly", "Daily"],
+                    index=0,
+                    help="Toggle between hourly and daily forecast views",
+                    horizontal=True,
+                )
+
+            # Load and display forecast
             with st.spinner(f"Loading {forecast_days}-day forecast..."):
                 forecast = get_forecast_cached(location.latitude, location.longitude, forecast_days)
 
@@ -298,6 +315,25 @@ def main() -> None:
 
         except Exception as e:  # noqa: BLE001
             st.error(f"❌ **Unexpected error:** {e}\n\nPlease try again or contact support if the issue persists.")
+
+    # Footer
+    st.divider()
+    st.markdown(
+        """
+        <div style='text-align: center; padding: 2rem 0 1rem 0; color: #666;'>
+            <h4>About This Dashboard</h4>
+            <p>
+                This dashboard uses <strong>OpenStreetMap Nominatim</strong> for geocoding and
+                <strong>Open-Meteo API</strong> for weather forecasts.
+                All humidity data represents <strong>Relative Humidity (%)</strong>.
+            </p>
+            <p style='font-size: 0.9em; margin-top: 1rem;'>
+                Data is cached to improve performance and respect API rate limits.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 if __name__ == "__main__":
