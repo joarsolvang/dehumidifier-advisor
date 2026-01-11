@@ -546,6 +546,7 @@ dependencies = [
     { name = "polars" },
     { name = "pydantic" },
     { name = "streamlit" },
+    { name = "tornado" },
 ]
 
 [package.dev-dependencies]
@@ -574,6 +575,7 @@ requires-dist = [
     { name = "polars", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "streamlit", specifier = ">=1.30.0" },
+    { name = "tornado", specifier = ">=6.0.0" },
 ]
 
 [package.metadata.requires-dev]
