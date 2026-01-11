@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import ClassVar
 
 import polars as pl
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class HourlyHumidityData(BaseModel):
@@ -85,3 +85,34 @@ class HumidityForecast(BaseModel):
         """Pydantic model configuration."""
 
         json_encoders: ClassVar[dict] = {datetime: lambda v: v.isoformat()}
+
+
+class Location(BaseModel):
+    """Location information with coordinates and address details.
+
+    This model represents a geographic location with both coordinates
+    and human-readable address components.
+    """
+
+    city: str = Field(description="City name")
+    country: str = Field(description="Country name")
+    state: str | None = Field(None, description="State/province/region (optional)")
+    latitude: float = Field(description="Latitude (-90 to 90)")
+    longitude: float = Field(description="Longitude (-180 to 180)")
+    display_name: str | None = Field(None, description="Full formatted address from geocoder")
+
+    @field_validator("latitude")
+    @classmethod
+    def validate_latitude(cls, v: float) -> float:
+        """Validate latitude is within valid range."""
+        if not -90 <= v <= 90:
+            raise ValueError(f"Latitude must be between -90 and 90, got {v}")
+        return v
+
+    @field_validator("longitude")
+    @classmethod
+    def validate_longitude(cls, v: float) -> float:
+        """Validate longitude is within valid range."""
+        if not -180 <= v <= 180:
+            raise ValueError(f"Longitude must be between -180 and 180, got {v}")
+        return v

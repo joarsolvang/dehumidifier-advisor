@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "geopy>=2.4.0",
     "httpx>=0.27.0",
     "matplotlib>=3.10.7",
     "polars>=1.0.0",
@@ -75,7 +76,7 @@ lint.select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S101"]
+"tests/**/*.py" = ["S101", "SLF001"]
 "example_usage.py" = ["T201"]
 "main.py" = ["T201"]
 "notebook/**/*.ipynb" = ["I001", "T201"]
@@ -88,6 +89,7 @@ python_version = "3.12"
 ignore_missing_imports = true
 disallow_untyped_defs = true
 exclude = ".venv|__ignore__"
+plugins = ["pydantic.mypy"]
 
 [tool.coverage.run]
 branch = true
