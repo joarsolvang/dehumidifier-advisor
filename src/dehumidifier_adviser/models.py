@@ -1,10 +1,9 @@
 """Data models for Open-Meteo API responses."""
 
 from datetime import datetime
-from typing import ClassVar
 
 import polars as pl
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class HourlyHumidityData(BaseModel):
@@ -71,6 +70,8 @@ class DailyHumidityData(BaseModel):
 class HumidityForecast(BaseModel):
     """Complete humidity forecast response from Open-Meteo API."""
 
+    model_config = ConfigDict(json_encoders={datetime: lambda v: v.isoformat()})
+
     latitude: float = Field(description="Location latitude")
     longitude: float = Field(description="Location longitude")
     timezone: str = Field(description="Timezone identifier")
@@ -80,11 +81,6 @@ class HumidityForecast(BaseModel):
     daily: DailyHumidityData | None = Field(None, description="Daily humidity data")
     hourly_units: dict[str, str] | None = Field(None, description="Units for hourly parameters")
     daily_units: dict[str, str] | None = Field(None, description="Units for daily parameters")
-
-    class Config:
-        """Pydantic model configuration."""
-
-        json_encoders: ClassVar[dict] = {datetime: lambda v: v.isoformat()}
 
 
 class Location(BaseModel):
