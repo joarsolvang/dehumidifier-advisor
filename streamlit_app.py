@@ -220,10 +220,15 @@ def main() -> None:
                     "country": country.strip(),
                     "state": state.strip() if state else None,
                 }
+                st.success(f"✓ Searching for: {city.strip()}, {country.strip()}")
 
     # Display results if location has been submitted
     if "location_input" in st.session_state:
         loc_input = st.session_state.location_input
+
+        # Debug info (can be removed later)
+        with st.expander("🔧 Debug Info"):
+            st.json(loc_input)
 
         try:
             # Get location with spinner
@@ -290,9 +295,10 @@ def main() -> None:
             else:
                 plot_daily_humidity(forecast)
 
-        except LocationNotFoundError:
+        except LocationNotFoundError as e:
             st.error(
                 f"🔍 **Location not found:** '{loc_input['city']}, {loc_input['country']}'\n\n"
+                f"**Error details:** {e!s}\n\n"
                 "**Suggestions:**\n"
                 "- Check spelling of city and country names\n"
                 "- Try using full country name (e.g., 'United Kingdom' not 'UK')\n"
