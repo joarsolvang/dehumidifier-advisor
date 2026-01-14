@@ -6,12 +6,19 @@ from dehumidifier_adviser.geocoding import (
     GeocodingServiceError,
     LocationNotFoundError,
 )
-from dehumidifier_adviser.models import DailyHumidityData, HourlyHumidityData, HumidityForecast, Location
+from dehumidifier_adviser.models import (
+    CurrentWeather,
+    DailyHumidityData,
+    HourlyHumidityData,
+    HumidityForecast,
+    Location,
+)
 from dehumidifier_adviser.weather import OpenMeteoClient
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "CurrentWeather",
     "DailyHumidityData",
     "Geocoder",
     "GeocodingError",

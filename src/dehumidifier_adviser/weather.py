@@ -34,6 +34,13 @@ class OpenMeteoClient:
         "dew_point_2m_min",
     ]
 
+    # Current weather parameters (temperature, humidity, weather code)
+    CURRENT_WEATHER_PARAMS: ClassVar[list[str]] = [
+        "temperature_2m",
+        "relative_humidity_2m",
+        "weather_code",
+    ]
+
     def __init__(self, timeout: float = 10.0) -> None:
         """Initialize the Open-Meteo client.
 
@@ -144,3 +151,55 @@ class OpenMeteoClient:
             current["vapour_pressure_deficit"] = forecast.hourly.vapour_pressure_deficit[last_index]
 
         return current
+
+    def get_current_conditions(
+        self, latitude: float, longitude: float, *, timezone: str = "auto"
+    ) -> dict[str, float | int | None]:
+        """Get current weather conditions including temperature, humidity, and weather code.
+
+        Uses the Open-Meteo 'current' parameter for efficient real-time data retrieval.
+
+        Args:
+            latitude: Location latitude (-90 to 90)
+            longitude: Location longitude (-180 to 180)
+            timezone: Timezone for timestamps (default: "auto")
+
+        Returns:
+            Dictionary with current conditions:
+            - temperature_2m: Temperature in °C
+            - relative_humidity_2m: Humidity in %
+            - weather_code: WMO weather interpretation code (0-99)
+            - time: Timestamp of measurement
+
+        Raises:
+            httpx.HTTPError: If the API request fails
+            ValueError: If latitude/longitude are out of valid ranges
+        """
+        if not -90 <= latitude <= 90:
+            raise ValueError(f"Latitude must be between -90 and 90, got {latitude}")
+        if not -180 <= longitude <= 180:
+            raise ValueError(f"Longitude must be between -180 and 180, got {longitude}")
+
+        params: dict[str, Any] = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "current": ",".join(self.CURRENT_WEATHER_PARAMS),
+            "timezone": timezone,
+        }
+
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.get(self.BASE_URL, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+        # Extract current weather data from response
+        current_data = data.get("current", {})
+
+        result: dict[str, float | int | None] = {
+            "temperature_2m": current_data.get("temperature_2m"),
+            "relative_humidity_2m": current_data.get("relative_humidity_2m"),
+            "weather_code": current_data.get("weather_code"),
+            "time": current_data.get("time"),
+        }
+
+        return result

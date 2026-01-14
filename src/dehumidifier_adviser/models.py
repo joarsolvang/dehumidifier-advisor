@@ -67,6 +67,17 @@ class DailyHumidityData(BaseModel):
         return pl.DataFrame(data)
 
 
+class CurrentWeather(BaseModel):
+    """Current weather conditions from Open-Meteo API."""
+
+    model_config = ConfigDict(frozen=True)
+
+    time: datetime = Field(description="Timestamp of current conditions")
+    temperature_2m: float = Field(description="Temperature at 2m above ground (°C)")
+    relative_humidity_2m: float = Field(description="Relative humidity at 2m (%)")
+    weather_code: int = Field(ge=0, le=99, description="WMO weather interpretation code")
+
+
 class HumidityForecast(BaseModel):
     """Complete humidity forecast response from Open-Meteo API."""
 
