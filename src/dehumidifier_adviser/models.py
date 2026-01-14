@@ -11,6 +11,7 @@ class HourlyHumidityData(BaseModel):
 
     time: list[datetime] = Field(description="Hourly timestamps")
     relative_humidity_2m: list[float] | None = Field(None, description="Relative humidity at 2m above ground (%)")
+    temperature_2m: list[float] | None = Field(None, description="Temperature at 2m above ground (°C)")
     dew_point_2m: list[float] | None = Field(None, description="Dew point temperature at 2m (°C)")
     vapour_pressure_deficit: list[float] | None = Field(None, description="Vapour Pressure Deficit (VPD) in kPa")
 
@@ -24,6 +25,8 @@ class HourlyHumidityData(BaseModel):
 
         if self.relative_humidity_2m is not None:
             data["relative_humidity_2m"] = self.relative_humidity_2m
+        if self.temperature_2m is not None:
+            data["temperature_2m"] = self.temperature_2m
         if self.dew_point_2m is not None:
             data["dew_point_2m"] = self.dew_point_2m
         if self.vapour_pressure_deficit is not None:
@@ -39,6 +42,9 @@ class DailyHumidityData(BaseModel):
     relative_humidity_2m_mean: list[float] | None = Field(None, description="Mean daily relative humidity at 2m (%)")
     relative_humidity_2m_max: list[float] | None = Field(None, description="Maximum daily relative humidity at 2m (%)")
     relative_humidity_2m_min: list[float] | None = Field(None, description="Minimum daily relative humidity at 2m (%)")
+    temperature_2m_mean: list[float] | None = Field(None, description="Mean daily temperature at 2m (°C)")
+    temperature_2m_max: list[float] | None = Field(None, description="Maximum daily temperature at 2m (°C)")
+    temperature_2m_min: list[float] | None = Field(None, description="Minimum daily temperature at 2m (°C)")
     dew_point_2m_mean: list[float] | None = Field(None, description="Mean daily dew point at 2m (°C)")
     dew_point_2m_max: list[float] | None = Field(None, description="Maximum daily dew point at 2m (°C)")
     dew_point_2m_min: list[float] | None = Field(None, description="Minimum daily dew point at 2m (°C)")
@@ -57,6 +63,12 @@ class DailyHumidityData(BaseModel):
             data["relative_humidity_2m_max"] = self.relative_humidity_2m_max
         if self.relative_humidity_2m_min is not None:
             data["relative_humidity_2m_min"] = self.relative_humidity_2m_min
+        if self.temperature_2m_mean is not None:
+            data["temperature_2m_mean"] = self.temperature_2m_mean
+        if self.temperature_2m_max is not None:
+            data["temperature_2m_max"] = self.temperature_2m_max
+        if self.temperature_2m_min is not None:
+            data["temperature_2m_min"] = self.temperature_2m_min
         if self.dew_point_2m_mean is not None:
             data["dew_point_2m_mean"] = self.dew_point_2m_mean
         if self.dew_point_2m_max is not None:
