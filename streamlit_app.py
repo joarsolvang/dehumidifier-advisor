@@ -21,6 +21,17 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Default location (London, United Kingdom)
+# Pre-cached to avoid unnecessary Nominatim API calls on initial page load
+DEFAULT_LOCATION = Location(
+    city="London",
+    country="United Kingdom",
+    state="England",
+    latitude=51.5074,
+    longitude=-0.1278,
+    display_name="London, Greater London, England, United Kingdom",
+)
+
 
 @st.cache_data(ttl=3600)  # Cache for 1 hour
 def get_location_cached(city: str, country: str, state: str | None) -> Location:
@@ -165,6 +176,102 @@ def plot_daily_humidity(forecast: HumidityForecast) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
+def get_location_to_display() -> Location | None:
+    """Determine which location to display based on user input or default.
+
+    Returns:
+        Location object, or None if geocoding failed
+    """
+    if "location_input" in st.session_state:
+        loc_input = st.session_state.location_input
+
+        try:
+            with st.spinner("🌍 Finding location..."):
+                return get_location_cached(loc_input["city"], loc_input["country"], loc_input["state"])
+
+        except LocationNotFoundError:
+            st.error(
+                f"🔍 **Location not found:** '{loc_input['city']}, {loc_input['country']}'\n\n"
+                "**Suggestions:**\n"
+                "- Check spelling of city and country names\n"
+                "- Try using full country name (e.g., 'United Kingdom' not 'UK')\n"
+                "- Add state/region for disambiguation (e.g., 'New York' state for 'New York' city)"
+            )
+            return None
+
+        except GeocodingServiceError as e:
+            st.error(
+                f"🌐 **Geocoding service error:** {e}\n\n"
+                "**Possible causes:**\n"
+                "- Network connectivity issues\n"
+                "- Service temporarily unavailable\n"
+                "- Rate limit exceeded (1 request/second limit)\n\n"
+                "**Try:** Wait a few seconds and try again."
+            )
+
+            if st.button("Clear Cache & Retry"):
+                st.cache_data.clear()
+                st.rerun()
+            return None
+
+        except Exception as e:  # noqa: BLE001
+            st.error(f"❌ **Unexpected error:** {e}\n\nPlease try again or contact support if the issue persists.")
+            return None
+
+    # Use default location on initial page load
+    return DEFAULT_LOCATION
+
+
+def display_weather_data(location: Location, forecast_days: int, view_mode: str) -> None:
+    """Display weather data for the given location.
+
+    Args:
+        location: Location object with coordinates and address
+        forecast_days: Number of days to forecast
+        view_mode: Display mode ("Hourly" or "Daily")
+    """
+    # Display map
+    st.subheader("📍 Location")
+    map_data = pd.DataFrame({"lat": [location.latitude], "lon": [location.longitude]})
+    st.map(map_data, zoom=10)
+
+    # Current conditions
+    st.subheader("💧 Current Conditions")
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        with st.spinner("Loading current conditions..."):
+            current = get_current_humidity_cached(location.latitude, location.longitude)
+        humidity = current.get("relative_humidity_2m", "N/A")
+        st.metric("Relative Humidity", f"{humidity}%" if humidity != "N/A" else "N/A")
+
+    with col2:
+        st.write(f"**Location:** {location.city}, {location.country}")
+        if location.state:
+            st.write(f"**Region:** {location.state}")
+
+    with col3:
+        st.write("**Coordinates:**")
+        st.write(f"Lat: {location.latitude:.4f}")
+        st.write(f"Lon: {location.longitude:.4f}")
+
+    # Forecast
+    st.subheader("📊 Humidity Forecast")
+
+    try:
+        with st.spinner(f"Loading {forecast_days}-day forecast..."):
+            forecast = get_forecast_cached(location.latitude, location.longitude, forecast_days)
+
+        # Display appropriate chart based on view mode
+        if view_mode == "Hourly":
+            plot_hourly_humidity(forecast)
+        else:
+            plot_daily_humidity(forecast)
+
+    except Exception as e:  # noqa: BLE001
+        st.error(f"❌ **Weather data error:** {e}\n\nPlease try again or contact support if the issue persists.")
+
+
 def main() -> None:
     """Main Streamlit application."""
     # Header
@@ -227,77 +334,12 @@ def main() -> None:
                     "state": state.strip() if state else None,
                 }
 
-    # Display results if location has been submitted
-    if "location_input" in st.session_state:
-        loc_input = st.session_state.location_input
+    # Get location to display (default or user-specified)
+    location = get_location_to_display()
 
-        try:
-            # Get location with spinner
-            with st.spinner("🌍 Finding location..."):
-                location = get_location_cached(loc_input["city"], loc_input["country"], loc_input["state"])
-
-            # Display map
-            st.subheader("📍 Location")
-            map_data = pd.DataFrame({"lat": [location.latitude], "lon": [location.longitude]})
-            st.map(map_data, zoom=10)
-
-            # Current conditions
-            st.subheader("💧 Current Conditions")
-            col1, col2, col3 = st.columns(3)
-
-            with col1:
-                with st.spinner("Loading current conditions..."):
-                    current = get_current_humidity_cached(location.latitude, location.longitude)
-                humidity = current.get("relative_humidity_2m", "N/A")
-                st.metric("Relative Humidity", f"{humidity}%" if humidity != "N/A" else "N/A")
-
-            with col2:
-                st.write(f"**Location:** {location.city}, {location.country}")
-                if location.state:
-                    st.write(f"**Region:** {location.state}")
-
-            with col3:
-                st.write("**Coordinates:**")
-                st.write(f"Lat: {location.latitude:.4f}")
-                st.write(f"Lon: {location.longitude:.4f}")
-
-            # Forecast
-            st.subheader("📊 Humidity Forecast")
-
-            with st.spinner(f"Loading {forecast_days}-day forecast..."):
-                forecast = get_forecast_cached(location.latitude, location.longitude, forecast_days)
-
-            # Display appropriate chart based on view mode
-            if view_mode == "Hourly":
-                plot_hourly_humidity(forecast)
-            else:
-                plot_daily_humidity(forecast)
-
-        except LocationNotFoundError:
-            st.error(
-                f"🔍 **Location not found:** '{loc_input['city']}, {loc_input['country']}'\n\n"
-                "**Suggestions:**\n"
-                "- Check spelling of city and country names\n"
-                "- Try using full country name (e.g., 'United Kingdom' not 'UK')\n"
-                "- Add state/region for disambiguation (e.g., 'New York' state for 'New York' city)"
-            )
-
-        except GeocodingServiceError as e:
-            st.error(
-                f"🌐 **Geocoding service error:** {e}\n\n"
-                "**Possible causes:**\n"
-                "- Network connectivity issues\n"
-                "- Service temporarily unavailable\n"
-                "- Rate limit exceeded (1 request/second limit)\n\n"
-                "**Try:** Wait a few seconds and try again."
-            )
-
-            if st.button("Clear Cache & Retry"):
-                st.cache_data.clear()
-                st.rerun()
-
-        except Exception as e:  # noqa: BLE001
-            st.error(f"❌ **Unexpected error:** {e}\n\nPlease try again or contact support if the issue persists.")
+    # Display weather data if location is available
+    if location:
+        display_weather_data(location, forecast_days, view_mode)
 
 
 if __name__ == "__main__":
