@@ -2,6 +2,7 @@
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from dehumidifier_adviser import (
@@ -11,6 +12,15 @@ from dehumidifier_adviser import (
     Location,
     LocationNotFoundError,
     OpenMeteoClient,
+)
+from dehumidifier_adviser.scenarios import SCENARIO_FACTORIES
+from humidity_simulator_client import (
+    HumiditySimulatorClient,
+    HumiditySource,
+    SimulationRequest,
+    SimulationResult,
+    SimulatorConnectionError,
+    SimulatorError,
 )
 
 # Page configuration
@@ -314,6 +324,173 @@ def plot_daily_temperature(forecast: HumidityForecast) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
+def plot_simulation_results(result: SimulationResult) -> None:
+    """Create and display simulation results as a dual-axis line chart.
+
+    Args:
+        result: SimulationResult containing timeseries data.
+    """
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=result.timestamps,
+            y=result.relative_humidity,
+            name="Relative Humidity (%)",
+            yaxis="y",
+            mode="lines+markers",
+            marker={"size": 4},
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=result.timestamps,
+            y=result.absolute_humidity,
+            name="Absolute Humidity (g/m\u00b3)",
+            yaxis="y2",
+            mode="lines+markers",
+            marker={"size": 4},
+        )
+    )
+
+    fig.update_layout(
+        title="Humidity Simulation Results",
+        xaxis_title="Time",
+        yaxis={
+            "title": "Relative Humidity (%)",
+            "range": [0, 100],
+        },
+        yaxis2={
+            "title": "Absolute Humidity (g/m\u00b3)",
+            "overlaying": "y",
+            "side": "right",
+        },
+        hovermode="x unified",
+        template="plotly_white",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def display_simulation_tab(forecast_days: int) -> None:
+    """Display the humidity simulation tab content."""
+    sim_col_left, sim_col_right = st.columns([1, 1])
+
+    with sim_col_left:
+        st.subheader("Room Configuration")
+
+        unit_system = st.radio(
+            "Unit System",
+            options=["Metric", "Imperial"],
+            horizontal=True,
+            key="sim_unit_system",
+        )
+        is_metric = unit_system == "Metric"
+
+        area_unit = "m\u00b2" if is_metric else "ft\u00b2"
+        height_unit = "m" if is_metric else "ft"
+        temp_unit = "\u00b0C" if is_metric else "\u00b0F"
+
+        surface_area = st.number_input(
+            f"Surface Area ({area_unit})",
+            min_value=1.0,
+            max_value=500.0,
+            value=20.0 if is_metric else 215.0,
+            step=1.0,
+            key="sim_surface_area",
+        )
+
+        ceiling_height = st.number_input(
+            f"Ceiling Height ({height_unit})",
+            min_value=1.0,
+            max_value=10.0,
+            value=2.5 if is_metric else 8.2,
+            step=0.1,
+            key="sim_ceiling_height",
+        )
+
+        temperature = st.number_input(
+            f"Room Temperature ({temp_unit})",
+            min_value=-10.0 if is_metric else 14.0,
+            max_value=50.0 if is_metric else 122.0,
+            value=20.0 if is_metric else 68.0,
+            step=0.5,
+            key="sim_temperature",
+        )
+
+        starting_rh = st.slider(
+            "Starting Relative Humidity (%)",
+            min_value=0,
+            max_value=100,
+            value=50,
+            key="sim_starting_rh",
+        )
+
+    with sim_col_right:
+        st.subheader("Scenario")
+
+        scenario_name = st.selectbox(
+            "Choose a scenario",
+            options=list(SCENARIO_FACTORIES.keys()),
+            key="sim_scenario",
+        )
+
+    st.divider()
+
+    if st.button("Run Simulation", use_container_width=True, type="primary"):
+        sources = SCENARIO_FACTORIES[scenario_name](pd.Timestamp.now().normalize(), forecast_days)
+        _run_simulation(sources, surface_area, ceiling_height, temperature, starting_rh, is_metric=is_metric)
+
+
+def _run_simulation(
+    sources: list[HumiditySource],
+    surface_area: float,
+    ceiling_height: float,
+    temperature: float,
+    starting_rh: int,
+    *,
+    is_metric: bool,
+) -> None:
+    """Build and execute a simulation request, then display results."""
+    request = SimulationRequest(
+        surface_area=surface_area,
+        surface_area_unit="m2" if is_metric else "ft2",
+        ceiling_height=ceiling_height,
+        ceiling_height_unit="m" if is_metric else "ft",
+        internal_temperature=temperature,
+        internal_temperature_unit="c" if is_metric else "f",
+        starting_relative_humidity=float(starting_rh),
+        sources=sources,
+    )
+
+    simulator_url = st.session_state.get("simulator_api_url", HumiditySimulatorClient.DEFAULT_BASE_URL)
+    client = HumiditySimulatorClient(base_url=simulator_url)
+
+    try:
+        with st.spinner("Running simulation..."):
+            result = client.simulate(request)
+        plot_simulation_results(result)
+
+        with st.expander("Simulation Summary"):
+            st.markdown(
+                f"- **Peak relative humidity:** {max(result.relative_humidity):.1f}%\n"
+                f"- **Min relative humidity:** {min(result.relative_humidity):.1f}%\n"
+                f"- **Peak absolute humidity:** {max(result.absolute_humidity):.2f} g/m\u00b3\n"
+                f"- **Data points:** {len(result.timestamps)}"
+            )
+
+    except SimulatorConnectionError:
+        st.error(
+            f"Cannot connect to the humidity simulator API at **{simulator_url}**.\n\n"
+            "Make sure the simulator container is running:\n"
+            "```\ncd humidity-simulator && docker compose up -d --build\n```"
+        )
+    except SimulatorError as e:
+        st.error(f"Simulation error: {e}")
+
+
 def get_location_to_display() -> Location | None:
     """Determine which location to display based on user input or default.
 
@@ -378,8 +555,8 @@ def display_weather_data(location: Location, forecast_days: int) -> None:
         st.error(f"❌ **Weather data error:** {e}")
         return
 
-    # Create tabs for Current Conditions and Forecast
-    tab1, tab2 = st.tabs(["Current Conditions", "Forecast"])
+    # Create tabs for Current Conditions, Forecast, and Simulation
+    tab1, tab2, tab3 = st.tabs(["Current Conditions", "Forecast", "Simulation"])
 
     # Tab 1: Current Conditions
     with tab1:
@@ -535,6 +712,10 @@ def display_weather_data(location: Location, forecast_days: int) -> None:
             else:
                 plot_daily_temperature(forecast)
 
+    # Tab 3: Simulation
+    with tab3:
+        display_simulation_tab(forecast_days)
+
 
 def main() -> None:
     """Main Streamlit application."""
@@ -578,12 +759,23 @@ def main() -> None:
         )
 
         st.divider()
+
+        st.header("🔬 Simulator Settings")
+        st.text_input(
+            "Simulator API URL",
+            value=HumiditySimulatorClient.DEFAULT_BASE_URL,
+            key="simulator_api_url",
+            help="URL of the humidity-simulator API (default: http://localhost:8000)",
+        )
+
+        st.divider()
         st.markdown("### About")
         st.markdown(
             """
             This dashboard uses:
             - **OpenStreetMap Nominatim** for geocoding
             - **Open-Meteo API** for weather forecasts
+            - **Humidity Simulator API** for room simulation
             - **Relative Humidity (%)** as the primary metric
 
             Data is cached to improve performance and respect API rate limits.
