@@ -34,6 +34,3 @@ if you have activated the virtual environment (VSCode will do this automatically
 ```powershell
 . ".venv\Scripts\activate.ps1"
 ```
-
-## Contact
-Put your contact details here.
