@@ -446,6 +446,9 @@ def display_weather_data(location: Location, forecast_days: int) -> None:
                     unsafe_allow_html=True,
                 )
 
+            # Add vertical spacing to match horizontal column gap
+            st.markdown("<div style='margin: 0.5rem 0;'></div>", unsafe_allow_html=True)
+
             # Bottom row: Temperature and Weather
             row2_col1, row2_col2 = st.columns([1, 1])
 
