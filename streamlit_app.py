@@ -22,6 +22,8 @@ from humidity_simulator_client import (
     SimulatorConnectionError,
     SimulatorError,
 )
+from octopus_energy_uk_api import OctopusEnergyClient, OctopusEnergyError
+from octopus_energy_uk_api.models import AgileRatesTimeSeries
 
 # Page configuration
 st.set_page_config(
@@ -156,6 +158,57 @@ def get_current_conditions_cached(latitude: float, longitude: float) -> dict[str
     """
     client = OpenMeteoClient()
     return client.get_current_conditions(latitude=latitude, longitude=longitude)
+
+
+AGILE_PRODUCT_CODE = "AGILE-24-10-01"
+
+
+@st.cache_data(ttl=1800)  # Cache for 30 minutes
+def get_agile_rates_cached(gsp: str, forecast_days: int) -> AgileRatesTimeSeries:
+    """Fetch and cache Agile electricity rates for the forecast period.
+
+    Args:
+        gsp: Grid Supply Point region letter (A-P)
+        forecast_days: Number of days to fetch rates for
+
+    Returns:
+        AgileRatesTimeSeries with half-hourly electricity prices
+    """
+    from datetime import UTC, datetime, timedelta
+
+    client = OctopusEnergyClient()
+    now = datetime.now(tz=UTC)
+    return client.get_agile_rates_timeseries(
+        AGILE_PRODUCT_CODE,
+        gsp=gsp,
+        period_from=now,
+        period_to=now + timedelta(days=forecast_days),
+    )
+
+
+def plot_electricity_prices(timeseries: AgileRatesTimeSeries) -> None:
+    """Create and display a half-hourly electricity price line chart.
+
+    Args:
+        timeseries: AgileRatesTimeSeries with timestamps and prices
+    """
+    df = pd.DataFrame({"time": pd.to_datetime(timeseries.timestamps), "price": timeseries.values})
+
+    fig = px.line(
+        df,
+        x="time",
+        y="price",
+        title="Agile Electricity Price Forecast",
+        labels={"time": "Time", "price": "Price (p/kWh inc VAT)"},
+        markers=True,
+    )
+
+    fig.update_layout(
+        hovermode="x unified",
+        template="plotly_white",
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def plot_hourly_humidity(forecast: HumidityForecast) -> None:
@@ -682,21 +735,24 @@ def display_weather_data(location: Location, forecast_days: int) -> None:
         with control_col1:
             forecast_type = st.selectbox(
                 "Forecast Type",
-                options=["Humidity", "Temperature"],
+                options=["Humidity", "Temperature", "Electricity Price"],
                 index=0,
                 help="Select which metric to display in the forecast",
                 key="forecast_type_select",
             )
 
         with control_col2:
-            view_mode = st.radio(
-                "View Mode",
-                options=["Hourly", "Daily"],
-                index=0,
-                help="Toggle between hourly and daily forecast views",
-                horizontal=True,
-                key="view_mode_select",
-            )
+            if forecast_type == "Electricity Price":
+                st.markdown("")  # Electricity prices are always half-hourly
+            else:
+                view_mode = st.radio(
+                    "View Mode",
+                    options=["Hourly", "Daily"],
+                    index=0,
+                    help="Toggle between hourly and daily forecast views",
+                    horizontal=True,
+                    key="view_mode_select",
+                )
 
         st.divider()
 
@@ -706,11 +762,17 @@ def display_weather_data(location: Location, forecast_days: int) -> None:
                 plot_hourly_humidity(forecast)
             else:
                 plot_daily_humidity(forecast)
-        else:  # Temperature
+        elif forecast_type == "Temperature":
             if view_mode == "Hourly":
                 plot_hourly_temperature(forecast)
             else:
                 plot_daily_temperature(forecast)
+        else:  # Electricity Price
+            try:
+                agile_ts = get_agile_rates_cached(gsp="A", forecast_days=forecast_days)
+                plot_electricity_prices(agile_ts)
+            except OctopusEnergyError as e:
+                st.warning(f"Could not load electricity prices: {e}")
 
     # Tab 3: Simulation
     with tab3:
