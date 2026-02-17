@@ -22,7 +22,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dehumidifier_adviser", "src/humidity_simulator_client"]
+packages = ["src/dehumidifier_adviser", "src/humidity_simulator_client", "src/octopus_energy_uk_api"]
 
 [tool.hatch.version]
 path = "src/dehumidifier_adviser/__init__.py"
@@ -80,6 +80,7 @@ lint.select = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101", "SLF001"]
 "example_usage.py" = ["T201"]
+"example_octopus_energy.py" = ["T201"]
 "main.py" = ["T201"]
 "streamlit_app.py" = ["T201"]
 "notebook/**/*.ipynb" = ["I001", "T201"]
@@ -103,7 +104,7 @@ omit = ["tests/*"]
 skip_empty = true
 
 [tool.deptry]
-known_first_party = ["dehumidifier_adviser", "humidity_simulator_client"]
+known_first_party = ["dehumidifier_adviser", "humidity_simulator_client", "octopus_energy_uk_api"]
 
 [tool.poe.tasks]
 
