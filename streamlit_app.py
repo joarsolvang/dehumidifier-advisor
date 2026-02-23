@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from agile_predict_api import AgilePredictClient, AgilePredictError, EnergyForecastTimeSeries
 from dehumidifier_adviser import (
     Geocoder,
     GeocodingServiceError,
@@ -156,6 +157,65 @@ def get_current_conditions_cached(latitude: float, longitude: float) -> dict[str
     """
     client = OpenMeteoClient()
     return client.get_current_conditions(latitude=latitude, longitude=longitude)
+
+
+_GSP_REGIONS: dict[str, str] = {
+    "A": "A - South East England",
+    "B": "B - East Midlands",
+    "C": "C - East England",
+    "D": "D - Merseyside & North Wales",
+    "E": "E - West Midlands",
+    "F": "F - North East England",
+    "G": "G - North West England",
+    "H": "H - Southern England",
+    "J": "J - South East England (second zone)",
+    "K": "K - South Wales",
+    "L": "L - South West England",
+    "M": "M - Yorkshire",
+    "N": "N - South Scotland",
+    "P": "P - North Scotland",
+}
+
+
+@st.cache_data(ttl=1800)  # Cache for 30 minutes
+def get_agile_predict_cached(gsp: str, forecast_days: int) -> EnergyForecastTimeSeries:
+    """Fetch and cache Agile Predict electricity price forecast.
+
+    Args:
+        gsp: Grid Supply Point region letter (A-P)
+        forecast_days: Number of days to fetch
+
+    Returns:
+        EnergyForecastTimeSeries with half-hourly predicted electricity prices
+    """
+    client = AgilePredictClient()
+    forecasts = client.get_forecast(gsp, days=forecast_days)
+    return forecasts[0].to_timeseries()
+
+
+def plot_electricity_prices(timeseries: EnergyForecastTimeSeries) -> None:
+    """Create and display a half-hourly electricity price line chart.
+
+    Args:
+        timeseries: AgileRatesTimeSeries with timestamps and prices
+    """
+    df = pd.DataFrame({"time": pd.to_datetime(timeseries.timestamps), "price": timeseries.values})
+
+    fig = px.line(
+        df,
+        x="time",
+        y="price",
+        title="Agile Electricity Price Forecast",
+        labels={"time": "Time", "price": "Price (p/kWh inc VAT)"},
+        markers=True,
+    )
+
+    fig.update_layout(
+        hovermode="x unified",
+        template="plotly_white",
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def plot_hourly_humidity(forecast: HumidityForecast) -> None:
@@ -537,12 +597,13 @@ def get_location_to_display() -> Location | None:
     return DEFAULT_LOCATION
 
 
-def display_weather_data(location: Location, forecast_days: int) -> None:
+def display_weather_data(location: Location, forecast_days: int, gsp: str) -> None:
     """Display weather data for the given location.
 
     Args:
         location: Location object with coordinates and address
         forecast_days: Number of days to forecast
+        gsp: Grid Supply Point region letter used for electricity price forecasts
     """
     # Fetch current conditions and forecast data upfront
     try:
@@ -682,21 +743,24 @@ def display_weather_data(location: Location, forecast_days: int) -> None:
         with control_col1:
             forecast_type = st.selectbox(
                 "Forecast Type",
-                options=["Humidity", "Temperature"],
+                options=["Humidity", "Temperature", "Electricity Price"],
                 index=0,
                 help="Select which metric to display in the forecast",
                 key="forecast_type_select",
             )
 
         with control_col2:
-            view_mode = st.radio(
-                "View Mode",
-                options=["Hourly", "Daily"],
-                index=0,
-                help="Toggle between hourly and daily forecast views",
-                horizontal=True,
-                key="view_mode_select",
-            )
+            if forecast_type == "Electricity Price":
+                st.markdown("")  # Electricity prices are always half-hourly
+            else:
+                view_mode = st.radio(
+                    "View Mode",
+                    options=["Hourly", "Daily"],
+                    index=0,
+                    help="Toggle between hourly and daily forecast views",
+                    horizontal=True,
+                    key="view_mode_select",
+                )
 
         st.divider()
 
@@ -706,11 +770,17 @@ def display_weather_data(location: Location, forecast_days: int) -> None:
                 plot_hourly_humidity(forecast)
             else:
                 plot_daily_humidity(forecast)
-        else:  # Temperature
+        elif forecast_type == "Temperature":
             if view_mode == "Hourly":
                 plot_hourly_temperature(forecast)
             else:
                 plot_daily_temperature(forecast)
+        else:  # Electricity Price
+            try:
+                agile_ts = get_agile_predict_cached(gsp=gsp, forecast_days=forecast_days)
+                plot_electricity_prices(agile_ts)
+            except AgilePredictError as e:
+                st.warning(f"Could not load electricity prices: {e}")
 
     # Tab 3: Simulation
     with tab3:
@@ -758,6 +828,14 @@ def main() -> None:
             help="Number of days to forecast (API limit: 1-16)",
         )
 
+        gsp = st.selectbox(
+            "Electricity Region (GSP)",
+            options=list(_GSP_REGIONS.keys()),
+            format_func=lambda k: _GSP_REGIONS[k],
+            index=6,  # Default: G - North West England
+            help="UK Grid Supply Point region for Agile electricity price forecasts",
+        )
+
         st.divider()
 
         st.header("🔬 Simulator Settings")
@@ -776,6 +854,7 @@ def main() -> None:
             - **OpenStreetMap Nominatim** for geocoding
             - **Open-Meteo API** for weather forecasts
             - **Humidity Simulator API** for room simulation
+            - **[Agile Predict](https://agilepredict.com)** for electricity price forecasts
             - **Relative Humidity (%)** as the primary metric
 
             Data is cached to improve performance and respect API rate limits.
@@ -787,7 +866,7 @@ def main() -> None:
 
     # Display weather data if location is available
     if location:
-        display_weather_data(location, forecast_days)
+        display_weather_data(location, forecast_days, gsp)
 
 
 if __name__ == "__main__":
