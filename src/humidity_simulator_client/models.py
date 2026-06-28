@@ -52,3 +52,49 @@ class SimulationResult(BaseModel):
     relative_humidity: list[float]
     absolute_humidity: list[float]
     dehumidifier_running_cost_pence: list[float] | None = None
+
+
+class EnergyForecastTimeSeries(BaseModel):
+    """Electricity price forecast timeseries."""
+
+    timestamps: list[str]
+    timestamp_format: str
+    timezone: str
+    values: list[float]
+    values_unit: Literal["p/kWh"]
+
+
+class DehumidifierSpec(BaseModel):
+    """Dehumidifier hardware specification."""
+
+    name: str
+    wattage: float = Field(gt=0)
+    extraction_rate: float = Field(gt=0)
+    extraction_rate_unit: Literal["g/h", "kg/h", "lb/h"]
+
+
+class OptimisationRequest(SimulationRequest):
+    """Extends the simulation request with optimisation-specific inputs."""
+
+    energy_forecast: EnergyForecastTimeSeries
+    dehumidifier: DehumidifierSpec
+
+
+class GreedyStep(BaseModel):
+    """State snapshot yielded after each attempted greedy turn-off."""
+
+    iteration: int
+    n_total: int
+    schedule: list[int]
+    objective: float
+    simulation_result: SimulationResult
+    accepted: bool
+
+
+class StepsResponse(BaseModel):
+    """Response from the optimisation steps polling endpoint."""
+
+    job_id: str
+    steps: list[GreedyStep]
+    complete: bool
+    error: str | None = None

@@ -5,7 +5,12 @@ from typing import ClassVar
 
 import httpx
 
-from humidity_simulator_client.models import SimulationRequest, SimulationResult
+from humidity_simulator_client.models import (
+    OptimisationRequest,
+    SimulationRequest,
+    SimulationResult,
+    StepsResponse,
+)
 
 _POLL_INTERVAL = 0.5
 
@@ -50,6 +55,46 @@ class HumiditySimulatorClient:
         )
         response.raise_for_status()
         return response.json()["job_id"]  # type: ignore[no-any-return]
+
+    def submit_optimisation(self, request: OptimisationRequest) -> str:
+        """Submit an optimisation job and return the job ID."""
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.post(
+                    f"{self.base_url}/optimisation/jobs",
+                    json=request.model_dump(),
+                )
+                response.raise_for_status()
+                return response.json()["job_id"]  # type: ignore[no-any-return]
+        except httpx.ConnectError as e:
+            msg = f"Cannot connect to simulator API at {self.base_url}. Is the container running?"
+            raise SimulatorConnectionError(msg) from e
+        except httpx.HTTPStatusError as e:
+            msg = f"Simulator API error: {e.response.status_code} - {e.response.text}"
+            raise SimulatorError(msg) from e
+        except httpx.HTTPError as e:
+            msg = f"HTTP error communicating with simulator: {e}"
+            raise SimulatorError(msg) from e
+
+    def get_optimisation_steps(self, job_id: str, from_index: int = 0) -> StepsResponse:
+        """Fetch optimisation steps from a given index."""
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.get(
+                    f"{self.base_url}/optimisation/jobs/{job_id}/steps",
+                    params={"from_index": from_index},
+                )
+                response.raise_for_status()
+                return StepsResponse.model_validate(response.json())
+        except httpx.ConnectError as e:
+            msg = f"Cannot connect to simulator API at {self.base_url}. Is the container running?"
+            raise SimulatorConnectionError(msg) from e
+        except httpx.HTTPStatusError as e:
+            msg = f"Simulator API error: {e.response.status_code} - {e.response.text}"
+            raise SimulatorError(msg) from e
+        except httpx.HTTPError as e:
+            msg = f"HTTP error communicating with simulator: {e}"
+            raise SimulatorError(msg) from e
 
     def _poll_result(self, client: httpx.Client, job_id: str) -> SimulationResult:
         deadline = time.monotonic() + self.timeout

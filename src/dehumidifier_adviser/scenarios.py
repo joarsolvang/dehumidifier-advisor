@@ -64,15 +64,15 @@ def scenario_one_bed_flat(
     df.loc[flat_occupation, "breathing"] = 80.0
 
     # Shower: 15-min burst (weekday 07:00-07:15, weekend 09:00-09:15)
-    weekday_shower = df["is_weekday"] & (df["hour"] == 7) & (df["minute"].isin([0, 15]))
-    weekend_shower = ~df["is_weekday"] & (df["hour"] == 9) & (df["minute"].isin([0, 15]))
+    weekday_shower = df["is_weekday"] & (df["hour"] == 7) & (df["minute"].isin([0]))
+    weekend_shower = ~df["is_weekday"] & (df["hour"] == 9) & (df["minute"].isin([0]))
     df["shower"] = pd.NA
-    df.loc[weekday_shower | weekend_shower, "shower"] = 1200.0
+    df.loc[weekday_shower | weekend_shower, "shower"] = 500.0
 
     # Cooking: weekday evenings 18:00-19:00
     weekday_cooking = df["is_weekday"] & (df["hour"] >= 18) & (df["hour"] < 19)
     df["cooking"] = pd.NA
-    df.loc[weekday_cooking, "cooking"] = 600.0
+    df.loc[weekday_cooking, "cooking"] = 300.0
 
     return [
         _series_to_source(df["breathing"], "Breathing (1 person)"),
