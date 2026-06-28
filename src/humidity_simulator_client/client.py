@@ -100,6 +100,10 @@ class HumiditySimulatorClient:
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
             response = client.get(f"{self.base_url}/simulate/jobs/{job_id}/result")
+            if response.status_code == 404:
+                # Worker hasn't picked up the job yet — retry
+                time.sleep(_POLL_INTERVAL)
+                continue
             response.raise_for_status()
             data = response.json()
 

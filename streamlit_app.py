@@ -21,7 +21,6 @@ from dehumidifier_adviser.scenarios import SCENARIO_FACTORIES
 from humidity_simulator_client import (
     AmbientConditions,
     DehumidifierSpec,
-    EnergyForecastTimeSeries as OptimisationEnergyForecast,
     GreedyStep,
     HumiditySimulatorClient,
     HumiditySource,
@@ -32,10 +31,13 @@ from humidity_simulator_client import (
     SimulatorError,
     StepsResponse,
 )
+from humidity_simulator_client import (
+    EnergyForecastTimeSeries as OptimisationEnergyForecast,
+)
 
 # Page configuration
 st.set_page_config(
-    page_title="Dehumidifier Advisor",
+    page_title="Tørk",
     page_icon="🌧️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -443,7 +445,7 @@ def plot_simulation_results(result: SimulationResult) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _build_optimisation_plot(step: GreedyStep) -> go.Figure:
+def _build_optimisation_plot(step: GreedyStep, baseline_rh: list[float] | None = None) -> go.Figure:
     """Build a two-panel Plotly figure showing RH and dehumidifier schedule for a greedy step."""
     timestamps = pd.to_datetime(step.simulation_result.timestamps)
     rh = step.simulation_result.relative_humidity
@@ -456,12 +458,26 @@ def _build_optimisation_plot(step: GreedyStep) -> go.Figure:
         shared_xaxes=True,
         vertical_spacing=0.08,
         row_heights=[0.7, 0.3],
-        subplot_titles=["Relative Humidity", "Dehumidifier Schedule"],
+        subplot_titles=["", "Dehumidifier Schedule"],
     )
 
-    # RH line
+    # Unoptimised baseline (no dehumidifier)
+    if baseline_rh is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=timestamps,
+                y=baseline_rh,
+                name="Unoptimised RH (%)",
+                line={"color": "lightcoral", "dash": "dash", "width": 1.5},
+                opacity=0.8,
+            ),
+            row=1,
+            col=1,
+        )
+
+    # Optimised RH line
     fig.add_trace(
-        go.Scatter(x=timestamps, y=rh, name="Internal RH (%)", line=dict(color="steelblue", width=2)),
+        go.Scatter(x=timestamps, y=rh, name="Optimised RH (%)", line={"color": "steelblue", "width": 2}),
         row=1,
         col=1,
     )
@@ -472,7 +488,7 @@ def _build_optimisation_plot(step: GreedyStep) -> go.Figure:
             x=[timestamps.min(), timestamps.max()],
             y=[60, 60],
             name="60% recommended max",
-            line=dict(color="orange", dash="dash", width=1),
+            line={"color": "orange", "dash": "dash", "width": 1},
             opacity=0.8,
         ),
         row=1,
@@ -483,7 +499,7 @@ def _build_optimisation_plot(step: GreedyStep) -> go.Figure:
             x=[timestamps.min(), timestamps.max()],
             y=[40, 40],
             name="40% recommended min",
-            line=dict(color="green", dash="dash", width=1),
+            line={"color": "green", "dash": "dash", "width": 1},
             opacity=0.8,
         ),
         row=1,
@@ -516,7 +532,7 @@ def _build_optimisation_plot(step: GreedyStep) -> go.Figure:
             x=timestamps,
             y=schedule,
             name="Dehumidifier on",
-            line=dict(color="green", width=1.5, shape="hv"),
+            line={"color": "green", "width": 1.5, "shape": "hv"},
             fill="tozeroy",
             fillcolor="rgba(0,128,0,0.3)",
         ),
@@ -525,32 +541,118 @@ def _build_optimisation_plot(step: GreedyStep) -> go.Figure:
     )
 
     fig.update_layout(
-        yaxis=dict(range=[0, 105], title="Relative Humidity (%)"),
-        yaxis2=dict(tickvals=[0, 1], ticktext=["Off", "On"], range=[-0.1, 1.4], title="Schedule"),
+        yaxis={"range": [0, 105], "title": "Relative Humidity (%)"},
+        yaxis2={"tickvals": [0, 1], "ticktext": ["Off", "On"], "range": [-0.1, 1.4], "title": "Schedule"},
         hovermode="x unified",
         template="plotly_white",
         showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
     )
 
     return fig
 
 
-def _run_optimisation(client: HumiditySimulatorClient, request: OptimisationRequest) -> None:
-    """Submit an optimisation job and live-update the UI with each step as it arrives."""
+def _build_price_plot(step: GreedyStep, energy_forecast: OptimisationEnergyForecast) -> go.Figure:
+    """Build an electricity price chart with the dehumidifier schedule highlighted."""
+    price_fmt = energy_forecast.timestamp_format
+    if price_fmt.replace(" ", "") == "ISO8601":
+        price_ts = pd.to_datetime(energy_forecast.timestamps, utc=True).tz_convert(None)
+    else:
+        price_ts = pd.to_datetime(energy_forecast.timestamps, format=price_fmt)
+        if price_ts.tz is not None:
+            price_ts = price_ts.tz_convert(None)
+
+    sim_timestamps = pd.to_datetime(step.simulation_result.timestamps)
+    schedule = step.schedule
+    delta = sim_timestamps[1] - sim_timestamps[0] if len(sim_timestamps) > 1 else pd.Timedelta("30min")
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=price_ts,
+            y=energy_forecast.values,
+            name="Price (p/kWh)",
+            line={"color": "darkorange", "width": 1.5},
+        )
+    )
+
+    i, n = 0, len(schedule)
+    while i < n:
+        if schedule[i] == 1:
+            j = i
+            while j < n and schedule[j] == 1:
+                j += 1
+            fig.add_vrect(
+                x0=sim_timestamps[i],
+                x1=sim_timestamps[j - 1] + delta,
+                fillcolor="green",
+                opacity=0.15,
+                line_width=0,
+            )
+            i = j
+        else:
+            i += 1
+
+    fig.update_layout(
+        yaxis={"title": "Price (p/kWh)"},
+        hovermode="x unified",
+        template="plotly_white",
+        showlegend=True,
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
+    )
+
+    return fig
+
+
+def _baseline_simulation_request(request: OptimisationRequest) -> SimulationRequest:
+    """Build a plain SimulationRequest from an OptimisationRequest (strips dehumidifier/energy fields)."""
+    return SimulationRequest(
+        surface_area=request.surface_area,
+        surface_area_unit=request.surface_area_unit,
+        ceiling_height=request.ceiling_height,
+        ceiling_height_unit=request.ceiling_height_unit,
+        internal_temperature=request.internal_temperature,
+        internal_temperature_unit=request.internal_temperature_unit,
+        air_changes_per_hour=request.air_changes_per_hour,
+        starting_relative_humidity=request.starting_relative_humidity,
+        sources=request.sources,
+        external_ambient_conditions=request.external_ambient_conditions,
+    )
+
+
+def _submit_optimisation_job(client: HumiditySimulatorClient, request: OptimisationRequest) -> str | None:
+    """Submit an optimisation job; displays any error and returns None on failure."""
     try:
         with st.spinner("Submitting optimisation job..."):
-            job_id = client.submit_optimisation(request)
+            return client.submit_optimisation(request)
+    except SimulatorConnectionError as e:
+        st.error(f"❌ {e}")
+    except SimulatorError as e:
+        st.error(f"Optimisation error: {e}")
+    return None
+
+
+def _run_optimisation(client: HumiditySimulatorClient, request: OptimisationRequest) -> None:
+    """Run baseline simulation then submit optimisation job, live-updating the UI with each step."""
+    baseline_rh: list[float] | None = None
+    try:
+        with st.spinner("Running baseline simulation..."):
+            baseline_rh = client.simulate(_baseline_simulation_request(request)).relative_humidity
     except SimulatorConnectionError as e:
         st.error(f"❌ {e}")
         return
     except SimulatorError as e:
-        st.error(f"Optimisation error: {e}")
+        st.warning(f"Baseline simulation failed — chart will not show unoptimised line: {e}")
+
+    job_id = _submit_optimisation_job(client, request)
+    if job_id is None:
         return
 
     status_placeholder = st.empty()
     metric_placeholder = st.empty()
     plot_placeholder = st.empty()
+    price_placeholder = st.empty()
 
     status_placeholder.info("Waiting for first result...")
 
@@ -576,7 +678,11 @@ def _run_optimisation(client: HumiditySimulatorClient, request: OptimisationRequ
                 status_placeholder.progress(pct, text=label)
                 metric_placeholder.metric("Best Objective", f"£{latest_step.objective / 100:.2f}")
                 plot_placeholder.plotly_chart(
-                    _build_optimisation_plot(latest_step),
+                    _build_optimisation_plot(latest_step, baseline_rh),
+                    use_container_width=True,
+                )
+                price_placeholder.plotly_chart(
+                    _build_price_plot(latest_step, request.energy_forecast),
                     use_container_width=True,
                 )
 
@@ -592,96 +698,13 @@ def _run_optimisation(client: HumiditySimulatorClient, request: OptimisationRequ
 
 
 def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp: str) -> None:
-    """Display the optimisation tab content."""
-    opt_col_left, opt_col_right = st.columns([1, 1])
-
-    with opt_col_left:
-        st.subheader("Room Configuration")
-
-        unit_system = st.radio(
-            "Unit System",
-            options=["Metric", "Imperial"],
-            horizontal=True,
-            key="opt_unit_system",
-        )
-        is_metric = unit_system == "Metric"
-
-        area_unit = "m²" if is_metric else "ft²"
-        height_unit = "m" if is_metric else "ft"
-        temp_unit = "°C" if is_metric else "°F"
-
-        surface_area = st.number_input(
-            f"Surface Area ({area_unit})",
-            min_value=1.0,
-            max_value=500.0,
-            value=20.0 if is_metric else 215.0,
-            step=1.0,
-            key="opt_surface_area",
-        )
-        ceiling_height = st.number_input(
-            f"Ceiling Height ({height_unit})",
-            min_value=1.0,
-            max_value=10.0,
-            value=2.5 if is_metric else 8.2,
-            step=0.1,
-            key="opt_ceiling_height",
-        )
-        temperature = st.number_input(
-            f"Room Temperature ({temp_unit})",
-            min_value=-10.0 if is_metric else 14.0,
-            max_value=50.0 if is_metric else 122.0,
-            value=20.0 if is_metric else 68.0,
-            step=0.5,
-            key="opt_temperature",
-        )
-        starting_rh = st.slider(
-            "Starting Relative Humidity (%)",
-            min_value=0,
-            max_value=100,
-            value=50,
-            key="opt_starting_rh",
-        )
-        air_changes_per_hour = st.number_input(
-            "Air Changes per Hour (ACH)",
-            min_value=0.1,
-            max_value=10.0,
-            value=0.5,
-            step=0.1,
-            help="Ventilation rate — typical values: 0.2 (very tight), 0.5 (average), 1.0+ (draughty)",
-            key="opt_ach",
-        )
-
-    with opt_col_right:
-        st.subheader("Scenario")
-        scenario_name = st.selectbox(
-            "Choose a scenario",
-            options=list(SCENARIO_FACTORIES.keys()),
-            key="opt_scenario",
-        )
-
-        st.subheader("Dehumidifier")
-        dh_name = st.text_input("Name", value="Dehumidifier", key="opt_dh_name")
-        dh_wattage = st.number_input(
-            "Wattage (W)",
-            min_value=1.0,
-            max_value=5000.0,
-            value=250.0,
-            step=10.0,
-            key="opt_dh_wattage",
-        )
-        dh_extraction_rate = st.number_input(
-            "Extraction Rate (g/h)",
-            min_value=1.0,
-            max_value=5000.0,
-            value=400.0,
-            step=10.0,
-            key="opt_dh_extraction_rate",
-        )
-
-    st.divider()
-
+    """Display the optimisation tab — reads configuration from session state set in Configuration tab."""
     if st.button("Run Optimisation", use_container_width=True, type="primary"):
-        if forecast.hourly is None or forecast.hourly.relative_humidity_2m is None or forecast.hourly.temperature_2m is None:
+        if (
+            forecast.hourly is None
+            or forecast.hourly.relative_humidity_2m is None
+            or forecast.hourly.temperature_2m is None
+        ):
             st.error("❌ Forecast data is missing hourly humidity or temperature — cannot run optimisation.")
             return
 
@@ -700,7 +723,10 @@ def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp
             ambient_temperature=forecast.hourly.temperature_2m,
             ambient_temperature_unit="Celcius",
         )
+
+        scenario_name = st.session_state.get("cfg_scenario", next(iter(SCENARIO_FACTORIES.keys())))
         sources = SCENARIO_FACTORIES[scenario_name](pd.Timestamp.now().normalize(), forecast_days)
+
         energy_forecast = OptimisationEnergyForecast(
             timestamps=agile_ts.timestamps,
             timestamp_format=agile_ts.timestamp_format,
@@ -708,22 +734,23 @@ def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp
             values=agile_ts.values,
             values_unit=agile_ts.values_unit,
         )
+
         request = OptimisationRequest(
-            surface_area=surface_area,
-            surface_area_unit="m2" if is_metric else "ft2",
-            ceiling_height=ceiling_height,
-            ceiling_height_unit="m" if is_metric else "ft",
-            internal_temperature=temperature,
-            internal_temperature_unit="c" if is_metric else "f",
-            air_changes_per_hour=air_changes_per_hour,
-            starting_relative_humidity=float(starting_rh),
+            surface_area=st.session_state.get("cfg_surface_area", 20.0),
+            surface_area_unit="m2",
+            ceiling_height=st.session_state.get("cfg_ceiling_height", 2.5),
+            ceiling_height_unit="m",
+            internal_temperature=st.session_state.get("cfg_temperature", 20.0),
+            internal_temperature_unit="c",
+            air_changes_per_hour=st.session_state.get("cfg_ach", 0.5),
+            starting_relative_humidity=float(st.session_state.get("cfg_starting_rh", 50)),
             sources=sources,
             external_ambient_conditions=ambient_conditions,
             energy_forecast=energy_forecast,
             dehumidifier=DehumidifierSpec(
-                name=dh_name,
-                wattage=dh_wattage,
-                extraction_rate=dh_extraction_rate,
+                name=st.session_state.get("cfg_dh_name", "Dehumidifier"),
+                wattage=st.session_state.get("cfg_dh_wattage", 250.0),
+                extraction_rate=st.session_state.get("cfg_dh_extraction_rate", 400.0),
                 extraction_rate_unit="g/h",
             ),
         )
@@ -732,110 +759,92 @@ def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp
         _run_optimisation(HumiditySimulatorClient(base_url=simulator_url), request)
 
 
-def display_simulation_tab(forecast: HumidityForecast, forecast_days: int) -> None:
-    """Display the humidity simulation tab content."""
-    sim_col_left, sim_col_right = st.columns([1, 1])
+_SCENARIO_DESCRIPTIONS: dict[str, str] = {
+    "1 Bed Flat": (
+        "Single occupant flat.\n\n"
+        "- **Breathing** (80 g/h) continuously on weekdays and weekend mornings until noon\n"
+        "- **Shower** (1,200 g/h, 30 min) at 07:00 on weekdays and 09:00 on weekends\n"
+        "- **Cooking** (600 g/h, 1 hr) on weekday evenings 18:00\u201319:00"
+    ),
+}
 
-    with sim_col_left:
-        st.subheader("Room Configuration")
 
-        unit_system = st.radio(
-            "Unit System",
-            options=["Metric", "Imperial"],
-            horizontal=True,
-            key="sim_unit_system",
-        )
-        is_metric = unit_system == "Metric"
+def display_configuration_tab() -> None:
+    """Display the configuration tab \u2014 room, scenario and dehumidifier settings."""
+    cfg_tab_room, cfg_tab_scenario, cfg_tab_dh = st.tabs(["Room", "Scenario", "Dehumidifier"])
 
-        area_unit = "m\u00b2" if is_metric else "ft\u00b2"
-        height_unit = "m" if is_metric else "ft"
-        temp_unit = "\u00b0C" if is_metric else "\u00b0F"
-
-        surface_area = st.number_input(
-            f"Surface Area ({area_unit})",
+    with cfg_tab_room:
+        st.number_input(
+            "Surface Area (m\u00b2)",
             min_value=1.0,
             max_value=500.0,
-            value=20.0 if is_metric else 215.0,
+            value=65.0,
             step=1.0,
-            key="sim_surface_area",
+            key="cfg_surface_area",
         )
-
-        ceiling_height = st.number_input(
-            f"Ceiling Height ({height_unit})",
+        st.number_input(
+            "Ceiling Height (m)",
             min_value=1.0,
             max_value=10.0,
-            value=2.5 if is_metric else 8.2,
+            value=2.5,
             step=0.1,
-            key="sim_ceiling_height",
+            key="cfg_ceiling_height",
         )
-
-        temperature = st.number_input(
-            f"Room Temperature ({temp_unit})",
-            min_value=-10.0 if is_metric else 14.0,
-            max_value=50.0 if is_metric else 122.0,
-            value=20.0 if is_metric else 68.0,
+        st.number_input(
+            "Room Temperature (\u00b0C)",
+            min_value=-10.0,
+            max_value=50.0,
+            value=22.0,
             step=0.5,
-            key="sim_temperature",
+            key="cfg_temperature",
         )
-
-        starting_rh = st.slider(
+        st.slider(
             "Starting Relative Humidity (%)",
             min_value=0,
             max_value=100,
             value=50,
-            key="sim_starting_rh",
+            key="cfg_starting_rh",
         )
-
-        air_changes_per_hour = st.number_input(
+        st.number_input(
             "Air Changes per Hour (ACH)",
             min_value=0.1,
             max_value=10.0,
             value=0.5,
             step=0.1,
-            help="Ventilation rate \u2014 typical values: 0.2 (very tight), 0.5 (average), 1.0+ (draughty)",
-            key="sim_ach",
+            key="cfg_ach",
+        )
+        st.caption(
+            "ACH measures how many times per hour the entire room's air volume is replaced by outside air. "
+            "Typical values: 0.2 (very well sealed), 0.5 (average UK home), 1.0+ (draughty or well-ventilated)."
         )
 
-    with sim_col_right:
-        st.subheader("Scenario")
-
+    with cfg_tab_scenario:
         scenario_name = st.selectbox(
             "Choose a scenario",
             options=list(SCENARIO_FACTORIES.keys()),
-            key="sim_scenario",
+            key="cfg_scenario",
         )
+        description = _SCENARIO_DESCRIPTIONS.get(scenario_name, "")
+        if description:
+            st.markdown(description)
 
-    st.divider()
-
-    if st.button("Run Simulation", use_container_width=True, type="primary"):
-        if (
-            forecast.hourly is None
-            or forecast.hourly.relative_humidity_2m is None
-            or forecast.hourly.temperature_2m is None
-        ):
-            st.error("\u274c Forecast data is missing hourly humidity or temperature \u2014 cannot run simulation.")
-            return
-
-        ambient_conditions = AmbientConditions(
-            name="External Conditions",
-            timestamps=[t.strftime("%Y-%m-%d %H:%M") for t in forecast.hourly.time],
-            timestamp_format="%Y-%m-%d %H:%M",
-            timezone=forecast.timezone,
-            relative_humidity=forecast.hourly.relative_humidity_2m,
-            ambient_temperature=forecast.hourly.temperature_2m,
-            ambient_temperature_unit="Celcius",
+    with cfg_tab_dh:
+        st.text_input("Name", value="Dehumidifier", key="cfg_dh_name")
+        st.number_input(
+            "Wattage (W)",
+            min_value=1.0,
+            max_value=5000.0,
+            value=250.0,
+            step=10.0,
+            key="cfg_dh_wattage",
         )
-
-        sources = SCENARIO_FACTORIES[scenario_name](pd.Timestamp.now().normalize(), forecast_days)
-        _run_simulation(
-            sources,
-            surface_area,
-            ceiling_height,
-            temperature,
-            starting_rh,
-            air_changes_per_hour=air_changes_per_hour,
-            ambient_conditions=ambient_conditions,
-            is_metric=is_metric,
+        st.number_input(
+            "Extraction Rate (g/h)",
+            min_value=1.0,
+            max_value=5000.0,
+            value=400.0,
+            step=10.0,
+            key="cfg_dh_extraction_rate",
         )
 
 
@@ -955,8 +964,8 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
         st.error(f"❌ **Weather data error:** {e}")
         return
 
-    # Create tabs for Current Conditions, Forecast, Simulation, and Optimisation
-    tab1, tab2, tab3, tab4 = st.tabs(["Current Conditions", "Forecast", "Simulation", "Optimisation"])
+    # Create tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["Current Conditions", "Forecast", "Configuration", "Optimisation"])
 
     # Tab 1: Current Conditions
     with tab1:
@@ -1076,44 +1085,21 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
 
     # Tab 2: Forecast
     with tab2:
-        # Forecast controls in two columns
-        control_col1, control_col2 = st.columns([1, 1])
-
-        with control_col1:
-            forecast_type = st.selectbox(
-                "Forecast Type",
-                options=["Humidity", "Temperature", "Electricity Price"],
-                index=0,
-                help="Select which metric to display in the forecast",
-                key="forecast_type_select",
-            )
-
-        with control_col2:
-            if forecast_type == "Electricity Price":
-                st.markdown("")  # Electricity prices are always half-hourly
-            else:
-                view_mode = st.radio(
-                    "View Mode",
-                    options=["Hourly", "Daily"],
-                    index=0,
-                    help="Toggle between hourly and daily forecast views",
-                    horizontal=True,
-                    key="view_mode_select",
-                )
+        forecast_type = st.selectbox(
+            "Forecast Type",
+            options=["Humidity", "Temperature", "Electricity Price"],
+            index=0,
+            help="Select which metric to display in the forecast",
+            key="forecast_type_select",
+        )
 
         st.divider()
 
-        # Display appropriate chart based on forecast type and view mode
+        # Display appropriate chart based on forecast type
         if forecast_type == "Humidity":
-            if view_mode == "Hourly":
-                plot_hourly_humidity(forecast)
-            else:
-                plot_daily_humidity(forecast)
+            plot_hourly_humidity(forecast)
         elif forecast_type == "Temperature":
-            if view_mode == "Hourly":
-                plot_hourly_temperature(forecast)
-            else:
-                plot_daily_temperature(forecast)
+            plot_hourly_temperature(forecast)
         else:  # Electricity Price
             try:
                 agile_ts = get_agile_predict_cached(gsp=gsp, forecast_days=forecast_days)
@@ -1121,9 +1107,9 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
             except AgilePredictError as e:
                 st.warning(f"Could not load electricity prices: {e}")
 
-    # Tab 3: Simulation
+    # Tab 3: Configuration
     with tab3:
-        display_simulation_tab(forecast, forecast_days)
+        display_configuration_tab()
 
     # Tab 4: Optimisation
     with tab4:
@@ -1133,8 +1119,8 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
 def main() -> None:
     """Main Streamlit application."""
     # Header
-    st.title("Dehumidifier Advisor Dashboard")
-    st.markdown("Get humidity forecasts for any location worldwide")
+    st.title("Tørk")
+    st.markdown("Optimise your bills, optimise your drying, optimise your dehumidifier!")
 
     # Sidebar with location input and settings
     with st.sidebar:
