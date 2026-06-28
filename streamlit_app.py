@@ -16,6 +16,7 @@ from dehumidifier_adviser import (
 )
 from dehumidifier_adviser.scenarios import SCENARIO_FACTORIES
 from humidity_simulator_client import (
+    AmbientConditions,
     HumiditySimulatorClient,
     HumiditySource,
     SimulationRequest,
@@ -434,7 +435,7 @@ def plot_simulation_results(result: SimulationResult) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def display_simulation_tab(forecast_days: int) -> None:
+def display_simulation_tab(forecast: HumidityForecast, forecast_days: int) -> None:
     """Display the humidity simulation tab content."""
     sim_col_left, sim_col_right = st.columns([1, 1])
 
@@ -488,6 +489,16 @@ def display_simulation_tab(forecast_days: int) -> None:
             key="sim_starting_rh",
         )
 
+        air_changes_per_hour = st.number_input(
+            "Air Changes per Hour (ACH)",
+            min_value=0.1,
+            max_value=10.0,
+            value=0.5,
+            step=0.1,
+            help="Ventilation rate \u2014 typical values: 0.2 (very tight), 0.5 (average), 1.0+ (draughty)",
+            key="sim_ach",
+        )
+
     with sim_col_right:
         st.subheader("Scenario")
 
@@ -500,8 +511,35 @@ def display_simulation_tab(forecast_days: int) -> None:
     st.divider()
 
     if st.button("Run Simulation", use_container_width=True, type="primary"):
+        if (
+            forecast.hourly is None
+            or forecast.hourly.relative_humidity_2m is None
+            or forecast.hourly.temperature_2m is None
+        ):
+            st.error("\u274c Forecast data is missing hourly humidity or temperature \u2014 cannot run simulation.")
+            return
+
+        ambient_conditions = AmbientConditions(
+            name="External Conditions",
+            timestamps=[t.strftime("%Y-%m-%d %H:%M") for t in forecast.hourly.time],
+            timestamp_format="%Y-%m-%d %H:%M",
+            timezone=forecast.timezone,
+            relative_humidity=forecast.hourly.relative_humidity_2m,
+            ambient_temperature=forecast.hourly.temperature_2m,
+            ambient_temperature_unit="Celcius",
+        )
+
         sources = SCENARIO_FACTORIES[scenario_name](pd.Timestamp.now().normalize(), forecast_days)
-        _run_simulation(sources, surface_area, ceiling_height, temperature, starting_rh, is_metric=is_metric)
+        _run_simulation(
+            sources,
+            surface_area,
+            ceiling_height,
+            temperature,
+            starting_rh,
+            air_changes_per_hour=air_changes_per_hour,
+            ambient_conditions=ambient_conditions,
+            is_metric=is_metric,
+        )
 
 
 def _run_simulation(
@@ -511,6 +549,8 @@ def _run_simulation(
     temperature: float,
     starting_rh: int,
     *,
+    air_changes_per_hour: float,
+    ambient_conditions: AmbientConditions,
     is_metric: bool,
 ) -> None:
     """Build and execute a simulation request, then display results."""
@@ -521,8 +561,10 @@ def _run_simulation(
         ceiling_height_unit="m" if is_metric else "ft",
         internal_temperature=temperature,
         internal_temperature_unit="c" if is_metric else "f",
+        air_changes_per_hour=air_changes_per_hour,
         starting_relative_humidity=float(starting_rh),
         sources=sources,
+        external_ambient_conditions=ambient_conditions,
     )
 
     simulator_url = st.session_state.get("simulator_api_url", HumiditySimulatorClient.DEFAULT_BASE_URL)
@@ -784,7 +826,7 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
 
     # Tab 3: Simulation
     with tab3:
-        display_simulation_tab(forecast_days)
+        display_simulation_tab(forecast, forecast_days)
 
 
 def main() -> None:
