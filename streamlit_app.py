@@ -445,20 +445,30 @@ def plot_simulation_results(result: SimulationResult) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _build_optimisation_plot(step: GreedyStep, baseline_rh: list[float] | None = None) -> go.Figure:
-    """Build a two-panel Plotly figure showing RH and dehumidifier schedule for a greedy step."""
+def _build_optimisation_plot(
+    step: GreedyStep,
+    baseline_rh: list[float] | None = None,
+    energy_forecast: OptimisationEnergyForecast | None = None,
+) -> go.Figure:
+    """Build a multi-panel Plotly figure showing RH, dehumidifier schedule and (optionally) electricity price."""
     timestamps = pd.to_datetime(step.simulation_result.timestamps)
     rh = step.simulation_result.relative_humidity
     schedule = step.schedule
     delta = timestamps[1] - timestamps[0] if len(timestamps) > 1 else pd.Timedelta("30min")
 
+    n_rows = 3 if energy_forecast is not None else 2
+    row_heights = [0.5, 0.2, 0.3] if n_rows == 3 else [0.7, 0.3]
+    subplot_titles = (
+        ["", "Dehumidifier Schedule", "Electricity Price (p/kWh)"] if n_rows == 3 else ["", "Dehumidifier Schedule"]
+    )
+
     fig = make_subplots(
-        rows=2,
+        rows=n_rows,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.08,
-        row_heights=[0.7, 0.3],
-        subplot_titles=["", "Dehumidifier Schedule"],
+        vertical_spacing=0.06,
+        row_heights=row_heights,
+        subplot_titles=subplot_titles,
     )
 
     # Unoptimised baseline (no dehumidifier)
@@ -540,9 +550,54 @@ def _build_optimisation_plot(step: GreedyStep, baseline_rh: list[float] | None =
         col=1,
     )
 
+    # Electricity price panel (row 3) — only when forecast is provided
+    if energy_forecast is not None:
+        price_fmt = energy_forecast.timestamp_format
+        if price_fmt.replace(" ", "") == "ISO8601":
+            price_ts = pd.to_datetime(energy_forecast.timestamps, utc=True).tz_convert(None)
+        else:
+            price_ts = pd.to_datetime(energy_forecast.timestamps, format=price_fmt)
+            if price_ts.tz is not None:
+                price_ts = price_ts.tz_convert(None)
+
+        fig.add_trace(
+            go.Scatter(
+                x=price_ts,
+                y=energy_forecast.values,
+                name="Price (p/kWh)",
+                line={"color": "darkorange", "width": 1.5},
+            ),
+            row=3,
+            col=1,
+        )
+
+        # Highlight dehumidifier-on windows on the price panel
+        i, n = 0, len(schedule)
+        while i < n:
+            if schedule[i] == 1:
+                j = i
+                while j < n and schedule[j] == 1:
+                    j += 1
+                fig.add_vrect(
+                    x0=timestamps[i],
+                    x1=timestamps[j - 1] + delta,
+                    fillcolor="green",
+                    opacity=0.15,
+                    line_width=0,
+                    row=3,
+                    col=1,
+                )
+                i = j
+            else:
+                i += 1
+
+    yaxis3_layout = {"title": "Price (p/kWh)"} if energy_forecast is not None else {}
+
     fig.update_layout(
+        height=350 * n_rows,
         yaxis={"range": [0, 105], "title": "Relative Humidity (%)"},
         yaxis2={"tickvals": [0, 1], "ticktext": ["Off", "On"], "range": [-0.1, 1.4], "title": "Schedule"},
+        yaxis3=yaxis3_layout,
         hovermode="x unified",
         template="plotly_white",
         showlegend=True,
@@ -652,7 +707,6 @@ def _run_optimisation(client: HumiditySimulatorClient, request: OptimisationRequ
     status_placeholder = st.empty()
     metric_placeholder = st.empty()
     plot_placeholder = st.empty()
-    price_placeholder = st.empty()
 
     status_placeholder.info("Waiting for first result...")
 
@@ -678,12 +732,9 @@ def _run_optimisation(client: HumiditySimulatorClient, request: OptimisationRequ
                 status_placeholder.progress(pct, text=label)
                 metric_placeholder.metric("Best Objective", f"£{latest_step.objective / 100:.2f}")
                 plot_placeholder.plotly_chart(
-                    _build_optimisation_plot(latest_step, baseline_rh),
+                    _build_optimisation_plot(latest_step, baseline_rh, request.energy_forecast),
                     use_container_width=True,
-                )
-                price_placeholder.plotly_chart(
-                    _build_price_plot(latest_step, request.energy_forecast),
-                    use_container_width=True,
+                    key=f"opt_plot_{steps_seen}",
                 )
 
             if response.complete:
