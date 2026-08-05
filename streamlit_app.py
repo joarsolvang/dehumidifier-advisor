@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from agile_predict_api import AgilePredictClient, AgilePredictError, EnergyForecast, EnergyForecastTimeSeries
+from agile_predict_api import AgilePredictClient, AgilePredictError, EnergyForecast
 from dehumidifier_adviser import (
     Geocoder,
     GeocodingServiceError,
@@ -315,26 +315,66 @@ def build_merged_energy_forecast(gsp: str, forecast_days: int) -> MergedEnergyFo
     )
 
 
-def plot_electricity_prices(timeseries: EnergyForecastTimeSeries) -> None:
-    """Create and display a half-hourly electricity price line chart.
+def plot_merged_electricity_prices(merged_forecast: MergedEnergyForecast) -> None:
+    """Create and display a half-hourly electricity price chart from merged actual/forecast data.
+
+    Mirrors the price panel shown on the Optimisation tab: solid line for actual (Octopus)
+    prices, dashed line with a shaded p10/p90 band for forecast (Agile Predict) prices.
 
     Args:
-        timeseries: AgileRatesTimeSeries with timestamps and prices
+        merged_forecast: MergedEnergyForecast with actual and forecast price slices
     """
-    df = pd.DataFrame({"time": pd.to_datetime(timeseries.timestamps), "price": timeseries.values})
+    fig = go.Figure()
 
-    fig = px.line(
-        df,
-        x="time",
-        y="price",
-        title="Agile Electricity Price Forecast",
-        labels={"time": "Time", "price": "Price (p/kWh inc VAT)"},
-        markers=True,
-    )
+    if merged_forecast.actual_timestamps:
+        fig.add_trace(
+            go.Scatter(
+                x=merged_forecast.actual_timestamps,
+                y=merged_forecast.actual_values,
+                name="Octopus Agile Pricing (actual)",
+                line={"color": "steelblue", "width": 1.5},
+                mode="lines+markers",
+                marker={"size": 4},
+            )
+        )
+
+    if merged_forecast.forecast_timestamps:
+        if merged_forecast.forecast_values_low and merged_forecast.forecast_values_high:
+            band_x = list(merged_forecast.forecast_timestamps) + list(reversed(merged_forecast.forecast_timestamps))
+            band_y = list(merged_forecast.forecast_values_high) + list(
+                reversed(merged_forecast.forecast_values_low)
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=band_x,
+                    y=band_y,
+                    fill="toself",
+                    fillcolor="rgba(70, 130, 180, 0.15)",
+                    line={"width": 0},
+                    mode="lines",
+                    showlegend=False,
+                    hoverinfo="skip",
+                )
+            )
+
+        fig.add_trace(
+            go.Scatter(
+                x=merged_forecast.forecast_timestamps,
+                y=merged_forecast.forecast_values,
+                name="Agile Predict (forecast)",
+                line={"color": "steelblue", "width": 1.5, "dash": "dash"},
+                mode="lines+markers",
+                marker={"size": 4},
+            )
+        )
 
     fig.update_layout(
+        title="Agile Electricity Price Forecast",
+        xaxis_title="Time",
+        yaxis_title="Price (p/kWh inc VAT)",
         hovermode="x unified",
         template="plotly_white",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -1346,10 +1386,22 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
             plot_hourly_temperature(forecast)
         else:  # Electricity Price
             try:
-                agile_ts = get_agile_predict_cached(gsp=gsp, forecast_days=forecast_days).to_timeseries()
-                plot_electricity_prices(agile_ts)
+                with st.spinner("Loading electricity prices..."):
+                    merged_forecast = build_merged_energy_forecast(gsp=gsp, forecast_days=forecast_days)
             except AgilePredictError as e:
                 st.warning(f"Could not load electricity prices: {e}")
+            else:
+                if merged_forecast.actual_timestamps:
+                    st.caption(
+                        f"Using {len(merged_forecast.actual_timestamps)} actual price slots from Octopus Energy "
+                        f"and {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict."
+                    )
+                else:
+                    st.caption(
+                        f"Using {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict "
+                        "(Octopus actual prices unavailable)."
+                    )
+                plot_merged_electricity_prices(merged_forecast)
 
     # Tab 3: Configuration
     with tab3:
