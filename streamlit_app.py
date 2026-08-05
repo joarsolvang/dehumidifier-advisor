@@ -1,5 +1,6 @@
 """Streamlit dashboard for dehumidifier humidity forecasting."""
 
+import os
 import time
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
@@ -57,6 +58,12 @@ DEFAULT_LOCATION = Location(
     longitude=-0.1278,
     display_name="London, Greater London, England, United Kingdom",
 )
+
+# Simulator API base URL. Server-side config only (env var), never a user-editable UI
+# field — the value is used to make outbound HTTP requests from the Streamlit server,
+# so accepting it from visitor input would allow SSRF (e.g. probing internal services
+# or cloud metadata endpoints).
+SIMULATOR_API_URL = os.environ.get("SIMULATOR_API_URL", HumiditySimulatorClient.DEFAULT_BASE_URL)
 
 
 def get_weather_icon_and_description(weather_code: int) -> tuple[str, str]:
@@ -1037,8 +1044,7 @@ def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp
             ),
         )
 
-        simulator_url = st.session_state.get("simulator_api_url", HumiditySimulatorClient.DEFAULT_BASE_URL)
-        _run_optimisation(HumiditySimulatorClient(base_url=simulator_url), request, merged_forecast)
+        _run_optimisation(HumiditySimulatorClient(base_url=SIMULATOR_API_URL), request, merged_forecast)
 
 
 _SCENARIO_DESCRIPTIONS: dict[str, str] = {
@@ -1155,8 +1161,7 @@ def _run_simulation(
         external_ambient_conditions=ambient_conditions,
     )
 
-    simulator_url = st.session_state.get("simulator_api_url", HumiditySimulatorClient.DEFAULT_BASE_URL)
-    client = HumiditySimulatorClient(base_url=simulator_url)
+    client = HumiditySimulatorClient(base_url=SIMULATOR_API_URL)
 
     try:
         with st.spinner("Running simulation..."):
@@ -1173,7 +1178,7 @@ def _run_simulation(
 
     except SimulatorConnectionError:
         st.error(
-            f"Cannot connect to the humidity simulator API at **{simulator_url}**.\n\n"
+            f"Cannot connect to the humidity simulator API at **{SIMULATOR_API_URL}**.\n\n"
             "Make sure the simulator container is running:\n"
             "```\ncd humidity-simulator && docker compose up -d --build\n```"
         )
@@ -1457,16 +1462,6 @@ def main() -> None:
             format_func=lambda k: _GSP_REGIONS[k],
             index=6,  # Default: G - North West England
             help="UK Grid Supply Point region for Agile electricity price forecasts",
-        )
-
-        st.divider()
-
-        st.header("🔬 Simulator Settings")
-        st.text_input(
-            "Simulator API URL",
-            value=HumiditySimulatorClient.DEFAULT_BASE_URL,
-            key="simulator_api_url",
-            help="URL of the humidity-simulator API (default: http://localhost:8000)",
         )
 
         st.divider()
