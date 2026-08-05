@@ -1,9 +1,13 @@
-"""Data models for Open-Meteo API responses."""
-
+from dataclasses import dataclass
 from datetime import datetime
 
+import pandas as pd
 import polars as pl
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from humidity_simulator_client import (
+    EnergyForecastTimeSeries as OptimisationEnergyForecast,
+)
 
 
 class HourlyHumidityData(BaseModel):
@@ -135,3 +139,16 @@ class Location(BaseModel):
         if not -180 <= v <= 180:
             raise ValueError(f"Longitude must be between -180 and 180, got {v}")
         return v
+
+
+@dataclass
+class MergedEnergyForecast:
+    """Electricity price data combined from Octopus (actual) and Agile Predict (forecast)."""
+
+    combined: OptimisationEnergyForecast
+    actual_timestamps: list[pd.Timestamp]
+    actual_values: list[float]
+    forecast_timestamps: list[pd.Timestamp]
+    forecast_values: list[float]
+    forecast_values_low: list[float]
+    forecast_values_high: list[float]

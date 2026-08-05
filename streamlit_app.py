@@ -1,6 +1,8 @@
 """Streamlit dashboard for dehumidifier humidity forecasting."""
 
 import time
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
@@ -8,7 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from agile_predict_api import AgilePredictClient, AgilePredictError, EnergyForecastTimeSeries
+from agile_predict_api import AgilePredictClient, AgilePredictError, EnergyForecast, EnergyForecastTimeSeries
 from dehumidifier_adviser import (
     Geocoder,
     GeocodingServiceError,
@@ -17,6 +19,7 @@ from dehumidifier_adviser import (
     LocationNotFoundError,
     OpenMeteoClient,
 )
+from dehumidifier_adviser.models import MergedEnergyForecast
 from dehumidifier_adviser.scenarios import SCENARIO_FACTORIES
 from humidity_simulator_client import (
     AmbientConditions,
@@ -34,6 +37,7 @@ from humidity_simulator_client import (
 from humidity_simulator_client import (
     EnergyForecastTimeSeries as OptimisationEnergyForecast,
 )
+from octopus_energy_uk_api import AgileRatesTimeSeries, OctopusEnergyClient, OctopusEnergyError
 
 # Page configuration
 st.set_page_config(
@@ -188,8 +192,11 @@ _GSP_REGIONS: dict[str, str] = {
 }
 
 
+AGILE_PRODUCT_CODE = "AGILE-24-10-01"
+
+
 @st.cache_data(ttl=1800)  # Cache for 30 minutes
-def get_agile_predict_cached(gsp: str, forecast_days: int) -> EnergyForecastTimeSeries:
+def get_agile_predict_cached(gsp: str, forecast_days: int) -> EnergyForecast:
     """Fetch and cache Agile Predict electricity price forecast.
 
     Args:
@@ -197,11 +204,113 @@ def get_agile_predict_cached(gsp: str, forecast_days: int) -> EnergyForecastTime
         forecast_days: Number of days to fetch
 
     Returns:
-        EnergyForecastTimeSeries with half-hourly predicted electricity prices
+        EnergyForecast with half-hourly predicted prices and p10/p90 bands
     """
-    client = AgilePredictClient()
-    forecasts = client.get_forecast(gsp, days=forecast_days)
-    return forecasts[0].to_timeseries()
+    client = AgilePredictClient(timeout=30.0)
+    return client.get_forecast(gsp, days=forecast_days)[0]
+
+
+@st.cache_data(ttl=1800)  # Cache for 30 minutes
+def get_octopus_agile_cached(gsp: str) -> AgileRatesTimeSeries:
+    """Fetch and cache actual Agile unit rates from Octopus Energy for today onwards.
+
+    Args:
+        gsp: Grid Supply Point region letter (A-P)
+
+    Returns:
+        AgileRatesTimeSeries with half-hourly actual electricity prices
+
+    Raises:
+        OctopusEnergyError: If the API request fails
+    """
+    client = OctopusEnergyClient()
+    return client.get_agile_rates_timeseries(
+        AGILE_PRODUCT_CODE,
+        gsp=gsp,
+        period_from=datetime.now(tz=timezone.utc),
+    )
+
+
+def build_merged_energy_forecast(gsp: str, forecast_days: int) -> MergedEnergyForecast:
+    """Merge Octopus actual prices with Agile Predict forecast prices.
+
+    Octopus actual prices are used where available (roughly today + tomorrow after
+    4pm publication).  Agile Predict forecast fills the remainder of the window.
+
+    Args:
+        gsp: Grid Supply Point region letter (A-P)
+        forecast_days: Number of days to cover
+
+    Returns:
+        MergedEnergyForecast with combined series and separate actual/forecast slices
+    """
+    agile_forecast = get_agile_predict_cached(gsp=gsp, forecast_days=forecast_days)
+    agile_datetimes: pd.DatetimeIndex = pd.to_datetime(
+        [p.date_time for p in agile_forecast.prices], utc=True
+    ).tz_convert(None)
+    agile_ts_list = agile_datetimes.tolist()
+    agile_dict: dict[pd.Timestamp, float] = {ts: p.agile_pred for ts, p in zip(agile_ts_list, agile_forecast.prices)}
+    agile_low_dict: dict[pd.Timestamp, float | None] = {
+        ts: p.agile_low for ts, p in zip(agile_ts_list, agile_forecast.prices)
+    }
+    agile_high_dict: dict[pd.Timestamp, float | None] = {
+        ts: p.agile_high for ts, p in zip(agile_ts_list, agile_forecast.prices)
+    }
+
+    octopus_dict: dict[pd.Timestamp, float] = {}
+    try:
+        octopus_ts = get_octopus_agile_cached(gsp=gsp)
+        oct_datetimes: pd.DatetimeIndex = pd.to_datetime(octopus_ts.timestamps, utc=True).tz_convert(None)
+        octopus_dict = dict(zip(oct_datetimes.tolist(), octopus_ts.values))
+    except OctopusEnergyError:
+        pass  # Fall back to pure forecast if Octopus is unavailable
+
+    now_utc = pd.Timestamp(datetime.now(tz=timezone.utc)).tz_convert(None)
+    all_timestamps: list[pd.Timestamp] = sorted(
+        ts for ts in (set(agile_ts_list) | set(octopus_dict.keys())) if ts >= now_utc
+    )
+
+    actual_ts: list[pd.Timestamp] = []
+    actual_vals: list[float] = []
+    forecast_ts: list[pd.Timestamp] = []
+    forecast_vals: list[float] = []
+    forecast_vals_low: list[float] = []
+    forecast_vals_high: list[float] = []
+    combined_ts_strs: list[str] = []
+    combined_vals: list[float] = []
+
+    for ts in all_timestamps:
+        if ts in octopus_dict:
+            actual_ts.append(ts)
+            actual_vals.append(octopus_dict[ts])
+            combined_ts_strs.append(ts.isoformat())
+            combined_vals.append(octopus_dict[ts])
+        elif ts in agile_dict:
+            central = agile_dict[ts]
+            forecast_ts.append(ts)
+            forecast_vals.append(central)
+            forecast_vals_low.append(agile_low_dict.get(ts) or central)
+            forecast_vals_high.append(agile_high_dict.get(ts) or central)
+            combined_ts_strs.append(ts.isoformat())
+            combined_vals.append(central)
+
+    combined = OptimisationEnergyForecast(
+        timestamps=combined_ts_strs,
+        timestamp_format="ISO 8601",
+        timezone="UTC",
+        values=combined_vals,
+        values_unit="p/kWh",
+    )
+
+    return MergedEnergyForecast(
+        combined=combined,
+        actual_timestamps=actual_ts,
+        actual_values=actual_vals,
+        forecast_timestamps=forecast_ts,
+        forecast_values=forecast_vals,
+        forecast_values_low=forecast_vals_low,
+        forecast_values_high=forecast_vals_high,
+    )
 
 
 def plot_electricity_prices(timeseries: EnergyForecastTimeSeries) -> None:
@@ -448,7 +557,7 @@ def plot_simulation_results(result: SimulationResult) -> None:
 def _build_optimisation_plot(
     step: GreedyStep,
     baseline_rh: list[float] | None = None,
-    energy_forecast: OptimisationEnergyForecast | None = None,
+    merged_forecast: MergedEnergyForecast | None = None,
 ) -> go.Figure:
     """Build a multi-panel Plotly figure showing RH, dehumidifier schedule and (optionally) electricity price."""
     timestamps = pd.to_datetime(step.simulation_result.timestamps)
@@ -456,7 +565,7 @@ def _build_optimisation_plot(
     schedule = step.schedule
     delta = timestamps[1] - timestamps[0] if len(timestamps) > 1 else pd.Timedelta("30min")
 
-    n_rows = 3 if energy_forecast is not None else 2
+    n_rows = 3 if merged_forecast is not None else 2
     row_heights = [0.5, 0.2, 0.3] if n_rows == 3 else [0.7, 0.3]
     subplot_titles = (
         ["", "Dehumidifier Schedule", "Electricity Price (p/kWh)"] if n_rows == 3 else ["", "Dehumidifier Schedule"]
@@ -621,7 +730,7 @@ def _build_optimisation_plot(
             else:
                 i += 1
 
-    yaxis3_layout = {"title": "Price (p/kWh)"} if energy_forecast is not None else {}
+    yaxis3_layout = {"title": "Price (p/kWh)"} if merged_forecast is not None else {}
 
     fig.update_layout(
         height=350 * n_rows,
@@ -718,7 +827,9 @@ def _submit_optimisation_job(client: HumiditySimulatorClient, request: Optimisat
     return None
 
 
-def _run_optimisation(client: HumiditySimulatorClient, request: OptimisationRequest) -> None:
+def _run_optimisation(
+    client: HumiditySimulatorClient, request: OptimisationRequest, merged_forecast: MergedEnergyForecast
+) -> None:
     """Run baseline simulation then submit optimisation job, live-updating the UI with each step."""
     baseline_rh: list[float] | None = None
     try:
@@ -762,7 +873,7 @@ def _run_optimisation(client: HumiditySimulatorClient, request: OptimisationRequ
                 status_placeholder.progress(pct, text=label)
                 metric_placeholder.metric("Best Objective", f"£{latest_step.objective / 100:.2f}")
                 plot_placeholder.plotly_chart(
-                    _build_optimisation_plot(latest_step, baseline_rh, request.energy_forecast),
+                    _build_optimisation_plot(latest_step, baseline_rh, merged_forecast),
                     use_container_width=True,
                     key=f"opt_plot_{steps_seen}",
                 )
@@ -790,31 +901,38 @@ def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp
             return
 
         try:
-            agile_ts = get_agile_predict_cached(gsp=gsp, forecast_days=forecast_days)
+            with st.spinner("Loading electricity prices..."):
+                merged_forecast = build_merged_energy_forecast(gsp=gsp, forecast_days=forecast_days)
         except AgilePredictError as e:
             st.error(f"❌ Could not load electricity prices: {e}")
             return
 
+        if merged_forecast.actual_timestamps:
+            st.caption(
+                f"Using {len(merged_forecast.actual_timestamps)} actual price slots from Octopus Energy "
+                f"and {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict."
+            )
+        else:
+            st.caption(
+                f"Using {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict "
+                "(Octopus actual prices unavailable)."
+            )
+
         ambient_conditions = AmbientConditions(
             name="External Conditions",
-            timestamps=[t.strftime("%Y-%m-%d %H:%M") for t in forecast.hourly.time],
+            timestamps=[t.strftime("%Y-%m-%d %H:%M") for t in hourly_times],
             timestamp_format="%Y-%m-%d %H:%M",
             timezone=forecast.timezone,
-            relative_humidity=forecast.hourly.relative_humidity_2m,
-            ambient_temperature=forecast.hourly.temperature_2m,
+            relative_humidity=hourly_rh,
+            ambient_temperature=hourly_temp,
             ambient_temperature_unit="Celcius",
         )
 
         scenario_name = st.session_state.get("cfg_scenario", next(iter(SCENARIO_FACTORIES.keys())))
-        sources = SCENARIO_FACTORIES[scenario_name](pd.Timestamp.now().normalize(), forecast_days)
-
-        energy_forecast = OptimisationEnergyForecast(
-            timestamps=agile_ts.timestamps,
-            timestamp_format=agile_ts.timestamp_format,
-            timezone=agile_ts.timezone,
-            values=agile_ts.values,
-            values_unit=agile_ts.values_unit,
-        )
+        sources = [
+            _trim_source_to_future(s)
+            for s in SCENARIO_FACTORIES[scenario_name](pd.Timestamp.now().normalize(), forecast_days)
+        ]
 
         request = OptimisationRequest(
             surface_area=st.session_state.get("cfg_surface_area", 20.0),
@@ -827,7 +945,7 @@ def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp
             starting_relative_humidity=float(st.session_state.get("cfg_starting_rh", 50)),
             sources=sources,
             external_ambient_conditions=ambient_conditions,
-            energy_forecast=energy_forecast,
+            energy_forecast=merged_forecast.combined,
             dehumidifier=DehumidifierSpec(
                 name=st.session_state.get("cfg_dh_name", "Dehumidifier"),
                 wattage=st.session_state.get("cfg_dh_wattage", 250.0),
@@ -837,7 +955,7 @@ def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp
         )
 
         simulator_url = st.session_state.get("simulator_api_url", HumiditySimulatorClient.DEFAULT_BASE_URL)
-        _run_optimisation(HumiditySimulatorClient(base_url=simulator_url), request)
+        _run_optimisation(HumiditySimulatorClient(base_url=simulator_url), request, merged_forecast)
 
 
 _SCENARIO_DESCRIPTIONS: dict[str, str] = {
@@ -1183,7 +1301,7 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
             plot_hourly_temperature(forecast)
         else:  # Electricity Price
             try:
-                agile_ts = get_agile_predict_cached(gsp=gsp, forecast_days=forecast_days)
+                agile_ts = get_agile_predict_cached(gsp=gsp, forecast_days=forecast_days).to_timeseries()
                 plot_electricity_prices(agile_ts)
             except AgilePredictError as e:
                 st.warning(f"Could not load electricity prices: {e}")
