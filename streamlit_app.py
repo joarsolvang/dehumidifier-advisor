@@ -341,9 +341,7 @@ def plot_merged_electricity_prices(merged_forecast: MergedEnergyForecast) -> Non
     if merged_forecast.forecast_timestamps:
         if merged_forecast.forecast_values_low and merged_forecast.forecast_values_high:
             band_x = list(merged_forecast.forecast_timestamps) + list(reversed(merged_forecast.forecast_timestamps))
-            band_y = list(merged_forecast.forecast_values_high) + list(
-                reversed(merged_forecast.forecast_values_low)
-            )
+            band_y = list(merged_forecast.forecast_values_high) + list(reversed(merged_forecast.forecast_values_low))
             fig.add_trace(
                 go.Scatter(
                     x=band_x,
