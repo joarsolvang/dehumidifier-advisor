@@ -550,26 +550,56 @@ def _build_optimisation_plot(
         col=1,
     )
 
-    # Electricity price panel (row 3) — only when forecast is provided
-    if energy_forecast is not None:
-        price_fmt = energy_forecast.timestamp_format
-        if price_fmt.replace(" ", "") == "ISO8601":
-            price_ts = pd.to_datetime(energy_forecast.timestamps, utc=True).tz_convert(None)
-        else:
-            price_ts = pd.to_datetime(energy_forecast.timestamps, format=price_fmt)
-            if price_ts.tz is not None:
-                price_ts = price_ts.tz_convert(None)
+    # Electricity price panel (row 3) — split into actual (Octopus) and forecast (Agile Predict) traces
+    if merged_forecast is not None:
+        if merged_forecast.actual_timestamps:
+            fig.add_trace(
+                go.Scatter(
+                    x=merged_forecast.actual_timestamps,
+                    y=merged_forecast.actual_values,
+                    name="Octopus Agile Pricing",
+                    line={"color": "steelblue", "width": 1.5},
+                ),
+                row=3,
+                col=1,
+            )
 
-        fig.add_trace(
-            go.Scatter(
-                x=price_ts,
-                y=energy_forecast.values,
-                name="Price (p/kWh)",
-                line={"color": "darkorange", "width": 1.5},
-            ),
-            row=3,
-            col=1,
-        )
+        if merged_forecast.forecast_timestamps:
+            # P10/P90 shaded band rendered as a closed polygon
+            if merged_forecast.forecast_values_low and merged_forecast.forecast_values_high:
+                band_x = (
+                    list(merged_forecast.forecast_timestamps)
+                    + list(reversed(merged_forecast.forecast_timestamps))
+                )
+                band_y = (
+                    list(merged_forecast.forecast_values_high)
+                    + list(reversed(merged_forecast.forecast_values_low))
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=band_x,
+                        y=band_y,
+                        fill="toself",
+                        fillcolor="rgba(70, 130, 180, 0.15)",
+                        line={"width": 0},
+                        mode="lines",
+                        showlegend=False,
+                        hoverinfo="skip",
+                    ),
+                    row=3,
+                    col=1,
+                )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=merged_forecast.forecast_timestamps,
+                    y=merged_forecast.forecast_values,
+                    name="Agile Predict",
+                    line={"color": "steelblue", "width": 1.5, "dash": "dash"},
+                ),
+                row=3,
+                col=1,
+            )
 
         # Highlight dehumidifier-on windows on the price panel
         i, n = 0, len(schedule)
