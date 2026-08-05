@@ -14,8 +14,8 @@ class PricePoint(BaseModel):
 
     date_time: datetime
     agile_pred: float = Field(description="Predicted Agile electricity price (p/kWh)")
-    agile_pred_low: float | None = Field(default=None, description="Lower bound of price estimate (p/kWh)")
-    agile_pred_high: float | None = Field(default=None, description="Upper bound of price estimate (p/kWh)")
+    agile_low: float | None = Field(default=None, description="Lower bound of price estimate (p/kWh)")
+    agile_high: float | None = Field(default=None, description="Upper bound of price estimate (p/kWh)")
 
 
 class EnergyForecastTimeSeries(BaseModel):
