@@ -1,11 +1,16 @@
 """Streamlit dashboard for dehumidifier humidity forecasting."""
 
+import time
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
-from agile_predict_api import AgilePredictClient, AgilePredictError, EnergyForecastTimeSeries
+from agile_predict_api import AgilePredictClient, AgilePredictError, EnergyForecast, EnergyForecastTimeSeries
 from dehumidifier_adviser import (
     Geocoder,
     GeocodingServiceError,
@@ -14,20 +19,29 @@ from dehumidifier_adviser import (
     LocationNotFoundError,
     OpenMeteoClient,
 )
+from dehumidifier_adviser.models import MergedEnergyForecast
 from dehumidifier_adviser.scenarios import SCENARIO_FACTORIES
 from humidity_simulator_client import (
     AmbientConditions,
+    DehumidifierSpec,
+    GreedyStep,
     HumiditySimulatorClient,
     HumiditySource,
+    OptimisationRequest,
     SimulationRequest,
     SimulationResult,
     SimulatorConnectionError,
     SimulatorError,
+    StepsResponse,
 )
+from humidity_simulator_client import (
+    EnergyForecastTimeSeries as OptimisationEnergyForecast,
+)
+from octopus_energy_uk_api import AgileRatesTimeSeries, OctopusEnergyClient, OctopusEnergyError
 
 # Page configuration
 st.set_page_config(
-    page_title="Dehumidifier Advisor",
+    page_title="Tørk",
     page_icon="🌧️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -178,8 +192,11 @@ _GSP_REGIONS: dict[str, str] = {
 }
 
 
+AGILE_PRODUCT_CODE = "AGILE-24-10-01"
+
+
 @st.cache_data(ttl=1800)  # Cache for 30 minutes
-def get_agile_predict_cached(gsp: str, forecast_days: int) -> EnergyForecastTimeSeries:
+def get_agile_predict_cached(gsp: str, forecast_days: int) -> EnergyForecast:
     """Fetch and cache Agile Predict electricity price forecast.
 
     Args:
@@ -187,11 +204,115 @@ def get_agile_predict_cached(gsp: str, forecast_days: int) -> EnergyForecastTime
         forecast_days: Number of days to fetch
 
     Returns:
-        EnergyForecastTimeSeries with half-hourly predicted electricity prices
+        EnergyForecast with half-hourly predicted prices and p10/p90 bands
     """
-    client = AgilePredictClient()
-    forecasts = client.get_forecast(gsp, days=forecast_days)
-    return forecasts[0].to_timeseries()
+    client = AgilePredictClient(timeout=30.0)
+    return client.get_forecast(gsp, days=forecast_days)[0]
+
+
+@st.cache_data(ttl=1800)  # Cache for 30 minutes
+def get_octopus_agile_cached(gsp: str) -> AgileRatesTimeSeries:
+    """Fetch and cache actual Agile unit rates from Octopus Energy for today onwards.
+
+    Args:
+        gsp: Grid Supply Point region letter (A-P)
+
+    Returns:
+        AgileRatesTimeSeries with half-hourly actual electricity prices
+
+    Raises:
+        OctopusEnergyError: If the API request fails
+    """
+    client = OctopusEnergyClient()
+    return client.get_agile_rates_timeseries(
+        AGILE_PRODUCT_CODE,
+        gsp=gsp,
+        period_from=datetime.now(tz=UTC),
+    )
+
+
+def build_merged_energy_forecast(gsp: str, forecast_days: int) -> MergedEnergyForecast:
+    """Merge Octopus actual prices with Agile Predict forecast prices.
+
+    Octopus actual prices are used where available (roughly today + tomorrow after
+    4pm publication).  Agile Predict forecast fills the remainder of the window.
+
+    Args:
+        gsp: Grid Supply Point region letter (A-P)
+        forecast_days: Number of days to cover
+
+    Returns:
+        MergedEnergyForecast with combined series and separate actual/forecast slices
+    """
+    agile_forecast = get_agile_predict_cached(gsp=gsp, forecast_days=forecast_days)
+    agile_datetimes: pd.DatetimeIndex = pd.to_datetime(
+        [p.date_time for p in agile_forecast.prices], utc=True
+    ).tz_convert(None)
+    agile_ts_list = agile_datetimes.tolist()
+    agile_dict: dict[pd.Timestamp, float] = {
+        ts: p.agile_pred for ts, p in zip(agile_ts_list, agile_forecast.prices, strict=True)
+    }
+    agile_low_dict: dict[pd.Timestamp, float | None] = {
+        ts: p.agile_low for ts, p in zip(agile_ts_list, agile_forecast.prices, strict=True)
+    }
+    agile_high_dict: dict[pd.Timestamp, float | None] = {
+        ts: p.agile_high for ts, p in zip(agile_ts_list, agile_forecast.prices, strict=True)
+    }
+
+    octopus_dict: dict[pd.Timestamp, float] = {}
+    try:
+        octopus_ts = get_octopus_agile_cached(gsp=gsp)
+        oct_datetimes: pd.DatetimeIndex = pd.to_datetime(octopus_ts.timestamps, utc=True).tz_convert(None)
+        octopus_dict = dict(zip(oct_datetimes.tolist(), octopus_ts.values, strict=True))
+    except OctopusEnergyError:
+        pass  # Fall back to pure forecast if Octopus is unavailable
+
+    now_utc = pd.Timestamp(datetime.now(tz=UTC)).tz_convert(None)
+    all_timestamps: list[pd.Timestamp] = sorted(
+        ts for ts in (set(agile_ts_list) | set(octopus_dict.keys())) if ts >= now_utc
+    )
+
+    actual_ts: list[pd.Timestamp] = []
+    actual_vals: list[float] = []
+    forecast_ts: list[pd.Timestamp] = []
+    forecast_vals: list[float] = []
+    forecast_vals_low: list[float] = []
+    forecast_vals_high: list[float] = []
+    combined_ts_strs: list[str] = []
+    combined_vals: list[float] = []
+
+    for ts in all_timestamps:
+        if ts in octopus_dict:
+            actual_ts.append(ts)
+            actual_vals.append(octopus_dict[ts])
+            combined_ts_strs.append(ts.isoformat())
+            combined_vals.append(octopus_dict[ts])
+        elif ts in agile_dict:
+            central = agile_dict[ts]
+            forecast_ts.append(ts)
+            forecast_vals.append(central)
+            forecast_vals_low.append(agile_low_dict.get(ts) or central)
+            forecast_vals_high.append(agile_high_dict.get(ts) or central)
+            combined_ts_strs.append(ts.isoformat())
+            combined_vals.append(central)
+
+    combined = OptimisationEnergyForecast(
+        timestamps=combined_ts_strs,
+        timestamp_format="ISO 8601",
+        timezone="UTC",
+        values=combined_vals,
+        values_unit="p/kWh",
+    )
+
+    return MergedEnergyForecast(
+        combined=combined,
+        actual_timestamps=actual_ts,
+        actual_values=actual_vals,
+        forecast_timestamps=forecast_ts,
+        forecast_values=forecast_vals,
+        forecast_values_low=forecast_vals_low,
+        forecast_values_high=forecast_vals_high,
+    )
 
 
 def plot_electricity_prices(timeseries: EnergyForecastTimeSeries) -> None:
@@ -435,110 +556,539 @@ def plot_simulation_results(result: SimulationResult) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def display_simulation_tab(forecast: HumidityForecast, forecast_days: int) -> None:
-    """Display the humidity simulation tab content."""
-    sim_col_left, sim_col_right = st.columns([1, 1])
+def _build_optimisation_plot(  # noqa: C901
+    step: GreedyStep,
+    baseline_rh: list[float] | None = None,
+    merged_forecast: MergedEnergyForecast | None = None,
+) -> go.Figure:
+    """Build a multi-panel Plotly figure showing RH, dehumidifier schedule and (optionally) electricity price."""
+    timestamps = pd.to_datetime(step.simulation_result.timestamps)
+    rh = step.simulation_result.relative_humidity
+    schedule = step.schedule
+    delta = timestamps[1] - timestamps[0] if len(timestamps) > 1 else pd.Timedelta("30min")
 
-    with sim_col_left:
-        st.subheader("Room Configuration")
+    n_rows = 3 if merged_forecast is not None else 2
+    row_heights = [0.5, 0.2, 0.3] if n_rows == 3 else [0.7, 0.3]
+    subplot_titles = (
+        ["", "Dehumidifier Schedule", "Electricity Price (p/kWh)"] if n_rows == 3 else ["", "Dehumidifier Schedule"]
+    )
 
-        unit_system = st.radio(
-            "Unit System",
-            options=["Metric", "Imperial"],
-            horizontal=True,
-            key="sim_unit_system",
-        )
-        is_metric = unit_system == "Metric"
+    fig = make_subplots(
+        rows=n_rows,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        row_heights=row_heights,
+        subplot_titles=subplot_titles,
+    )
 
-        area_unit = "m\u00b2" if is_metric else "ft\u00b2"
-        height_unit = "m" if is_metric else "ft"
-        temp_unit = "\u00b0C" if is_metric else "\u00b0F"
-
-        surface_area = st.number_input(
-            f"Surface Area ({area_unit})",
-            min_value=1.0,
-            max_value=500.0,
-            value=20.0 if is_metric else 215.0,
-            step=1.0,
-            key="sim_surface_area",
-        )
-
-        ceiling_height = st.number_input(
-            f"Ceiling Height ({height_unit})",
-            min_value=1.0,
-            max_value=10.0,
-            value=2.5 if is_metric else 8.2,
-            step=0.1,
-            key="sim_ceiling_height",
-        )
-
-        temperature = st.number_input(
-            f"Room Temperature ({temp_unit})",
-            min_value=-10.0 if is_metric else 14.0,
-            max_value=50.0 if is_metric else 122.0,
-            value=20.0 if is_metric else 68.0,
-            step=0.5,
-            key="sim_temperature",
+    # Unoptimised baseline (no dehumidifier)
+    if baseline_rh is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=timestamps,
+                y=baseline_rh,
+                name="Unoptimised RH (%)",
+                line={"color": "lightcoral", "dash": "dash", "width": 1.5},
+                opacity=0.8,
+            ),
+            row=1,
+            col=1,
         )
 
-        starting_rh = st.slider(
-            "Starting Relative Humidity (%)",
-            min_value=0,
-            max_value=100,
-            value=50,
-            key="sim_starting_rh",
+    # Optimised RH line
+    fig.add_trace(
+        go.Scatter(x=timestamps, y=rh, name="Optimised RH (%)", line={"color": "steelblue", "width": 2}),
+        row=1,
+        col=1,
+    )
+
+    # 60% / 40% reference lines (as traces so they appear in the legend cleanly)
+    fig.add_trace(
+        go.Scatter(
+            x=[timestamps.min(), timestamps.max()],
+            y=[60, 60],
+            name="60% recommended max",
+            line={"color": "orange", "dash": "dash", "width": 1},
+            opacity=0.8,
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[timestamps.min(), timestamps.max()],
+            y=[40, 40],
+            name="40% recommended min",
+            line={"color": "green", "dash": "dash", "width": 1},
+            opacity=0.8,
+        ),
+        row=1,
+        col=1,
+    )
+
+    # Green shading on the RH panel for each contiguous ON block
+    i, n = 0, len(schedule)
+    while i < n:
+        if schedule[i] == 1:
+            j = i
+            while j < n and schedule[j] == 1:
+                j += 1
+            fig.add_vrect(
+                x0=timestamps[i],
+                x1=timestamps[j - 1] + delta,
+                fillcolor="green",
+                opacity=0.15,
+                line_width=0,
+                row=1,
+                col=1,
+            )
+            i = j
+        else:
+            i += 1
+
+    # Dehumidifier schedule step chart
+    fig.add_trace(
+        go.Scatter(
+            x=timestamps,
+            y=schedule,
+            name="Dehumidifier on",
+            line={"color": "green", "width": 1.5, "shape": "hv"},
+            fill="tozeroy",
+            fillcolor="rgba(0,128,0,0.3)",
+        ),
+        row=2,
+        col=1,
+    )
+
+    # Electricity price panel (row 3) — split into actual (Octopus) and forecast (Agile Predict) traces
+    if merged_forecast is not None:
+        if merged_forecast.actual_timestamps:
+            fig.add_trace(
+                go.Scatter(
+                    x=merged_forecast.actual_timestamps,
+                    y=merged_forecast.actual_values,
+                    name="Octopus Agile Pricing",
+                    line={"color": "steelblue", "width": 1.5},
+                ),
+                row=3,
+                col=1,
+            )
+
+        if merged_forecast.forecast_timestamps:
+            # P10/P90 shaded band rendered as a closed polygon
+            if merged_forecast.forecast_values_low and merged_forecast.forecast_values_high:
+                band_x = list(merged_forecast.forecast_timestamps) + list(reversed(merged_forecast.forecast_timestamps))
+                band_y = list(merged_forecast.forecast_values_high) + list(
+                    reversed(merged_forecast.forecast_values_low)
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=band_x,
+                        y=band_y,
+                        fill="toself",
+                        fillcolor="rgba(70, 130, 180, 0.15)",
+                        line={"width": 0},
+                        mode="lines",
+                        showlegend=False,
+                        hoverinfo="skip",
+                    ),
+                    row=3,
+                    col=1,
+                )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=merged_forecast.forecast_timestamps,
+                    y=merged_forecast.forecast_values,
+                    name="Agile Predict",
+                    line={"color": "steelblue", "width": 1.5, "dash": "dash"},
+                ),
+                row=3,
+                col=1,
+            )
+
+        # Highlight dehumidifier-on windows on the price panel
+        i, n = 0, len(schedule)
+        while i < n:
+            if schedule[i] == 1:
+                j = i
+                while j < n and schedule[j] == 1:
+                    j += 1
+                fig.add_vrect(
+                    x0=timestamps[i],
+                    x1=timestamps[j - 1] + delta,
+                    fillcolor="green",
+                    opacity=0.15,
+                    line_width=0,
+                    row=3,
+                    col=1,
+                )
+                i = j
+            else:
+                i += 1
+
+    yaxis3_layout = {"title": "Price (p/kWh)"} if merged_forecast is not None else {}
+
+    fig.update_layout(
+        height=350 * n_rows,
+        yaxis={"range": [0, 105], "title": "Relative Humidity (%)"},
+        yaxis2={"tickvals": [0, 1], "ticktext": ["Off", "On"], "range": [-0.1, 1.4], "title": "Schedule"},
+        yaxis3=yaxis3_layout,
+        hovermode="x unified",
+        template="plotly_white",
+        showlegend=True,
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
+    )
+
+    return fig
+
+
+def _build_price_plot(step: GreedyStep, energy_forecast: OptimisationEnergyForecast) -> go.Figure:
+    """Build an electricity price chart with the dehumidifier schedule highlighted."""
+    price_fmt = energy_forecast.timestamp_format
+    if price_fmt.replace(" ", "") == "ISO8601":
+        price_ts = pd.to_datetime(energy_forecast.timestamps, utc=True).tz_convert(None)
+    else:
+        price_ts = pd.to_datetime(energy_forecast.timestamps, format=price_fmt)
+        if price_ts.tz is not None:
+            price_ts = price_ts.tz_convert(None)
+
+    sim_timestamps = pd.to_datetime(step.simulation_result.timestamps)
+    schedule = step.schedule
+    delta = sim_timestamps[1] - sim_timestamps[0] if len(sim_timestamps) > 1 else pd.Timedelta("30min")
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=price_ts,
+            y=energy_forecast.values,
+            name="Price (p/kWh)",
+            line={"color": "darkorange", "width": 1.5},
         )
+    )
 
-        air_changes_per_hour = st.number_input(
-            "Air Changes per Hour (ACH)",
-            min_value=0.1,
-            max_value=10.0,
-            value=0.5,
-            step=0.1,
-            help="Ventilation rate \u2014 typical values: 0.2 (very tight), 0.5 (average), 1.0+ (draughty)",
-            key="sim_ach",
-        )
+    i, n = 0, len(schedule)
+    while i < n:
+        if schedule[i] == 1:
+            j = i
+            while j < n and schedule[j] == 1:
+                j += 1
+            fig.add_vrect(
+                x0=sim_timestamps[i],
+                x1=sim_timestamps[j - 1] + delta,
+                fillcolor="green",
+                opacity=0.15,
+                line_width=0,
+            )
+            i = j
+        else:
+            i += 1
 
-    with sim_col_right:
-        st.subheader("Scenario")
+    fig.update_layout(
+        yaxis={"title": "Price (p/kWh)"},
+        hovermode="x unified",
+        template="plotly_white",
+        showlegend=True,
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
+    )
 
-        scenario_name = st.selectbox(
-            "Choose a scenario",
-            options=list(SCENARIO_FACTORIES.keys()),
-            key="sim_scenario",
-        )
+    return fig
 
-    st.divider()
 
-    if st.button("Run Simulation", use_container_width=True, type="primary"):
+def _baseline_simulation_request(request: OptimisationRequest) -> SimulationRequest:
+    """Build a plain SimulationRequest from an OptimisationRequest (strips dehumidifier/energy fields)."""
+    return SimulationRequest(
+        surface_area=request.surface_area,
+        surface_area_unit=request.surface_area_unit,
+        ceiling_height=request.ceiling_height,
+        ceiling_height_unit=request.ceiling_height_unit,
+        internal_temperature=request.internal_temperature,
+        internal_temperature_unit=request.internal_temperature_unit,
+        air_changes_per_hour=request.air_changes_per_hour,
+        starting_relative_humidity=request.starting_relative_humidity,
+        sources=request.sources,
+        external_ambient_conditions=request.external_ambient_conditions,
+    )
+
+
+def _submit_optimisation_job(client: HumiditySimulatorClient, request: OptimisationRequest) -> str | None:
+    """Submit an optimisation job; displays any error and returns None on failure."""
+    try:
+        with st.spinner("Submitting optimisation job..."):
+            return client.submit_optimisation(request)
+    except SimulatorConnectionError as e:
+        st.error(f"❌ {e}")
+    except SimulatorError as e:
+        st.error(f"Optimisation error: {e}")
+    return None
+
+
+def _run_optimisation(
+    client: HumiditySimulatorClient, request: OptimisationRequest, merged_forecast: MergedEnergyForecast
+) -> None:
+    """Run baseline simulation then submit optimisation job, live-updating the UI with each step."""
+    baseline_rh: list[float] | None = None
+    try:
+        with st.spinner("Running baseline simulation..."):
+            baseline_rh = client.simulate(_baseline_simulation_request(request)).relative_humidity
+    except SimulatorConnectionError as e:
+        st.error(f"❌ {e}")
+        return
+    except SimulatorError as e:
+        st.warning(f"Baseline simulation failed — chart will not show unoptimised line: {e}")
+
+    job_id = _submit_optimisation_job(client, request)
+    if job_id is None:
+        return
+
+    status_placeholder = st.empty()
+    metric_placeholder = st.empty()
+    plot_placeholder = st.empty()
+
+    status_placeholder.info("Waiting for first result...")
+
+    steps_seen = 0
+    latest_step: GreedyStep | None = None
+
+    try:
+        while True:
+            response: StepsResponse = client.get_optimisation_steps(job_id, from_index=steps_seen)
+
+            for step in response.steps:
+                latest_step = step
+                steps_seen += 1
+
+            if latest_step is not None:
+                n_total = latest_step.n_total
+                pct = steps_seen / n_total
+                label = (
+                    f"Complete — {steps_seen} / {n_total} steps"
+                    if response.complete
+                    else f"Step {steps_seen} / {n_total} ({pct:.0%})"
+                )
+                status_placeholder.progress(pct, text=label)
+                metric_placeholder.metric("Best Objective", f"£{latest_step.objective / 100:.2f}")
+                plot_placeholder.plotly_chart(
+                    _build_optimisation_plot(latest_step, baseline_rh, merged_forecast),
+                    use_container_width=True,
+                    key=f"opt_plot_{steps_seen}",
+                )
+
+            if response.complete:
+                if response.error:
+                    st.error(f"Optimisation failed: {response.error}")
+                break
+
+            time.sleep(0.5)
+
+    except SimulatorError as e:
+        st.error(f"Optimisation error: {e}")
+
+
+def _trim_ambient_to_future(
+    times: list[datetime],
+    rh: list[float],
+    temp: list[float],
+    forecast_timezone: str,
+) -> tuple[list[datetime], list[float], list[float]]:
+    """Drop any hourly slots whose timestamp is before the current moment."""
+    try:
+        tz = ZoneInfo(forecast_timezone)
+        now_local = datetime.now(tz=tz).replace(tzinfo=None)
+    except Exception:  # noqa: BLE001
+        now_local = datetime.now()
+
+    triples = [(t, r, te) for t, r, te in zip(times, rh, temp, strict=True) if t >= now_local]
+    if not triples:
+        return [], [], []
+    ft, fr, fte = zip(*triples, strict=True)
+    return list(ft), list(fr), list(fte)
+
+
+def _trim_source_to_future(source: HumiditySource) -> HumiditySource:
+    """Drop any source emissions slots whose timestamp is before the current UTC moment."""
+    now_utc = datetime.now(tz=UTC).replace(tzinfo=None)
+    fmt = source.timestamp_format
+    future = [
+        (ts, v) for ts, v in zip(source.timestamps, source.values, strict=True) if datetime.strptime(ts, fmt) >= now_utc
+    ]
+    ts_list = [ts for ts, _ in future]
+    val_list = [v for _, v in future]
+    return HumiditySource(
+        name=source.name,
+        max_emissions_rate_unit=source.max_emissions_rate_unit,
+        timestamps=ts_list,
+        timestamp_format=source.timestamp_format,
+        timezone=source.timezone,
+        values=val_list,
+        values_unit=source.values_unit,
+    )
+
+
+def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp: str) -> None:
+    """Display the optimisation tab — reads configuration from session state set in Configuration tab."""
+    if st.button("Run Optimisation", use_container_width=True, type="primary"):
         if (
             forecast.hourly is None
             or forecast.hourly.relative_humidity_2m is None
             or forecast.hourly.temperature_2m is None
         ):
-            st.error("\u274c Forecast data is missing hourly humidity or temperature \u2014 cannot run simulation.")
+            st.error("❌ Forecast data is missing hourly humidity or temperature — cannot run optimisation.")
             return
+
+        try:
+            with st.spinner("Loading electricity prices..."):
+                merged_forecast = build_merged_energy_forecast(gsp=gsp, forecast_days=forecast_days)
+        except AgilePredictError as e:
+            st.error(f"❌ Could not load electricity prices: {e}")
+            return
+
+        if merged_forecast.actual_timestamps:
+            st.caption(
+                f"Using {len(merged_forecast.actual_timestamps)} actual price slots from Octopus Energy "
+                f"and {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict."
+            )
+        else:
+            st.caption(
+                f"Using {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict "
+                "(Octopus actual prices unavailable)."
+            )
+
+        hourly_times, hourly_rh, hourly_temp = _trim_ambient_to_future(
+            forecast.hourly.time,
+            forecast.hourly.relative_humidity_2m,
+            forecast.hourly.temperature_2m,
+            forecast.timezone,
+        )
 
         ambient_conditions = AmbientConditions(
             name="External Conditions",
-            timestamps=[t.strftime("%Y-%m-%d %H:%M") for t in forecast.hourly.time],
+            timestamps=[t.strftime("%Y-%m-%d %H:%M") for t in hourly_times],
             timestamp_format="%Y-%m-%d %H:%M",
             timezone=forecast.timezone,
-            relative_humidity=forecast.hourly.relative_humidity_2m,
-            ambient_temperature=forecast.hourly.temperature_2m,
+            relative_humidity=hourly_rh,
+            ambient_temperature=hourly_temp,
             ambient_temperature_unit="Celcius",
         )
 
-        sources = SCENARIO_FACTORIES[scenario_name](pd.Timestamp.now().normalize(), forecast_days)
-        _run_simulation(
-            sources,
-            surface_area,
-            ceiling_height,
-            temperature,
-            starting_rh,
-            air_changes_per_hour=air_changes_per_hour,
-            ambient_conditions=ambient_conditions,
-            is_metric=is_metric,
+        scenario_name = st.session_state.get("cfg_scenario", next(iter(SCENARIO_FACTORIES.keys())))
+        sources = [
+            _trim_source_to_future(s)
+            for s in SCENARIO_FACTORIES[scenario_name](pd.Timestamp.now().normalize(), forecast_days)
+        ]
+
+        request = OptimisationRequest(
+            surface_area=st.session_state.get("cfg_surface_area", 20.0),
+            surface_area_unit="m2",
+            ceiling_height=st.session_state.get("cfg_ceiling_height", 2.5),
+            ceiling_height_unit="m",
+            internal_temperature=st.session_state.get("cfg_temperature", 20.0),
+            internal_temperature_unit="c",
+            air_changes_per_hour=st.session_state.get("cfg_ach", 0.5),
+            starting_relative_humidity=float(st.session_state.get("cfg_starting_rh", 50)),
+            sources=sources,
+            external_ambient_conditions=ambient_conditions,
+            energy_forecast=merged_forecast.combined,
+            dehumidifier=DehumidifierSpec(
+                name=st.session_state.get("cfg_dh_name", "Dehumidifier"),
+                wattage=st.session_state.get("cfg_dh_wattage", 250.0),
+                extraction_rate=st.session_state.get("cfg_dh_extraction_rate", 400.0),
+                extraction_rate_unit="g/h",
+            ),
+        )
+
+        simulator_url = st.session_state.get("simulator_api_url", HumiditySimulatorClient.DEFAULT_BASE_URL)
+        _run_optimisation(HumiditySimulatorClient(base_url=simulator_url), request, merged_forecast)
+
+
+_SCENARIO_DESCRIPTIONS: dict[str, str] = {
+    "1 Bed Flat": (
+        "Single occupant flat.\n\n"
+        "- **Breathing** (80 g/h) continuously on weekdays and weekend mornings until noon\n"
+        "- **Shower** (1,200 g/h, 30 min) at 07:00 on weekdays and 09:00 on weekends\n"
+        "- **Cooking** (600 g/h, 1 hr) on weekday evenings 18:00\u201319:00"
+    ),
+}
+
+
+def display_configuration_tab() -> None:
+    """Display the configuration tab \u2014 room, scenario and dehumidifier settings."""
+    cfg_tab_room, cfg_tab_scenario, cfg_tab_dh = st.tabs(["Room", "Scenario", "Dehumidifier"])
+
+    with cfg_tab_room:
+        st.number_input(
+            "Surface Area (m\u00b2)",
+            min_value=1.0,
+            max_value=500.0,
+            value=65.0,
+            step=1.0,
+            key="cfg_surface_area",
+        )
+        st.number_input(
+            "Ceiling Height (m)",
+            min_value=1.0,
+            max_value=10.0,
+            value=2.5,
+            step=0.1,
+            key="cfg_ceiling_height",
+        )
+        st.number_input(
+            "Room Temperature (\u00b0C)",
+            min_value=-10.0,
+            max_value=50.0,
+            value=22.0,
+            step=0.5,
+            key="cfg_temperature",
+        )
+        st.slider(
+            "Starting Relative Humidity (%)",
+            min_value=0,
+            max_value=100,
+            value=50,
+            key="cfg_starting_rh",
+        )
+        st.number_input(
+            "Air Changes per Hour (ACH)",
+            min_value=0.1,
+            max_value=10.0,
+            value=0.5,
+            step=0.1,
+            key="cfg_ach",
+        )
+        st.caption(
+            "ACH measures how many times per hour the entire room's air volume is replaced by outside air. "
+            "Typical values: 0.2 (very well sealed), 0.5 (average UK home), 1.0+ (draughty or well-ventilated)."
+        )
+
+    with cfg_tab_scenario:
+        scenario_name = st.selectbox(
+            "Choose a scenario",
+            options=list(SCENARIO_FACTORIES.keys()),
+            key="cfg_scenario",
+        )
+        description = _SCENARIO_DESCRIPTIONS.get(scenario_name, "")
+        if description:
+            st.markdown(description)
+
+    with cfg_tab_dh:
+        st.text_input("Name", value="Dehumidifier", key="cfg_dh_name")
+        st.number_input(
+            "Wattage (W)",
+            min_value=1.0,
+            max_value=5000.0,
+            value=250.0,
+            step=10.0,
+            key="cfg_dh_wattage",
+        )
+        st.number_input(
+            "Extraction Rate (g/h)",
+            min_value=1.0,
+            max_value=5000.0,
+            value=400.0,
+            step=10.0,
+            key="cfg_dh_extraction_rate",
         )
 
 
@@ -658,8 +1208,8 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
         st.error(f"❌ **Weather data error:** {e}")
         return
 
-    # Create tabs for Current Conditions, Forecast, and Simulation
-    tab1, tab2, tab3 = st.tabs(["Current Conditions", "Forecast", "Simulation"])
+    # Create tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["Current Conditions", "Forecast", "Configuration", "Optimisation"])
 
     # Tab 1: Current Conditions
     with tab1:
@@ -779,61 +1329,42 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
 
     # Tab 2: Forecast
     with tab2:
-        # Forecast controls in two columns
-        control_col1, control_col2 = st.columns([1, 1])
-
-        with control_col1:
-            forecast_type = st.selectbox(
-                "Forecast Type",
-                options=["Humidity", "Temperature", "Electricity Price"],
-                index=0,
-                help="Select which metric to display in the forecast",
-                key="forecast_type_select",
-            )
-
-        with control_col2:
-            if forecast_type == "Electricity Price":
-                st.markdown("")  # Electricity prices are always half-hourly
-            else:
-                view_mode = st.radio(
-                    "View Mode",
-                    options=["Hourly", "Daily"],
-                    index=0,
-                    help="Toggle between hourly and daily forecast views",
-                    horizontal=True,
-                    key="view_mode_select",
-                )
+        forecast_type = st.selectbox(
+            "Forecast Type",
+            options=["Humidity", "Temperature", "Electricity Price"],
+            index=0,
+            help="Select which metric to display in the forecast",
+            key="forecast_type_select",
+        )
 
         st.divider()
 
-        # Display appropriate chart based on forecast type and view mode
+        # Display appropriate chart based on forecast type
         if forecast_type == "Humidity":
-            if view_mode == "Hourly":
-                plot_hourly_humidity(forecast)
-            else:
-                plot_daily_humidity(forecast)
+            plot_hourly_humidity(forecast)
         elif forecast_type == "Temperature":
-            if view_mode == "Hourly":
-                plot_hourly_temperature(forecast)
-            else:
-                plot_daily_temperature(forecast)
+            plot_hourly_temperature(forecast)
         else:  # Electricity Price
             try:
-                agile_ts = get_agile_predict_cached(gsp=gsp, forecast_days=forecast_days)
+                agile_ts = get_agile_predict_cached(gsp=gsp, forecast_days=forecast_days).to_timeseries()
                 plot_electricity_prices(agile_ts)
             except AgilePredictError as e:
                 st.warning(f"Could not load electricity prices: {e}")
 
-    # Tab 3: Simulation
+    # Tab 3: Configuration
     with tab3:
-        display_simulation_tab(forecast, forecast_days)
+        display_configuration_tab()
+
+    # Tab 4: Optimisation
+    with tab4:
+        display_optimisation_tab(forecast, forecast_days, gsp)
 
 
 def main() -> None:
     """Main Streamlit application."""
     # Header
-    st.title("Dehumidifier Advisor Dashboard")
-    st.markdown("Get humidity forecasts for any location worldwide")
+    st.title("Tørk")
+    st.markdown("Optimise your bills, optimise your drying, optimise your dehumidifier!")
 
     # Sidebar with location input and settings
     with st.sidebar:
