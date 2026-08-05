@@ -1,7 +1,7 @@
 """Streamlit dashboard for dehumidifier humidity forecasting."""
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -227,7 +227,7 @@ def get_octopus_agile_cached(gsp: str) -> AgileRatesTimeSeries:
     return client.get_agile_rates_timeseries(
         AGILE_PRODUCT_CODE,
         gsp=gsp,
-        period_from=datetime.now(tz=timezone.utc),
+        period_from=datetime.now(tz=UTC),
     )
 
 
@@ -249,23 +249,25 @@ def build_merged_energy_forecast(gsp: str, forecast_days: int) -> MergedEnergyFo
         [p.date_time for p in agile_forecast.prices], utc=True
     ).tz_convert(None)
     agile_ts_list = agile_datetimes.tolist()
-    agile_dict: dict[pd.Timestamp, float] = {ts: p.agile_pred for ts, p in zip(agile_ts_list, agile_forecast.prices)}
+    agile_dict: dict[pd.Timestamp, float] = {
+        ts: p.agile_pred for ts, p in zip(agile_ts_list, agile_forecast.prices, strict=True)
+    }
     agile_low_dict: dict[pd.Timestamp, float | None] = {
-        ts: p.agile_low for ts, p in zip(agile_ts_list, agile_forecast.prices)
+        ts: p.agile_low for ts, p in zip(agile_ts_list, agile_forecast.prices, strict=True)
     }
     agile_high_dict: dict[pd.Timestamp, float | None] = {
-        ts: p.agile_high for ts, p in zip(agile_ts_list, agile_forecast.prices)
+        ts: p.agile_high for ts, p in zip(agile_ts_list, agile_forecast.prices, strict=True)
     }
 
     octopus_dict: dict[pd.Timestamp, float] = {}
     try:
         octopus_ts = get_octopus_agile_cached(gsp=gsp)
         oct_datetimes: pd.DatetimeIndex = pd.to_datetime(octopus_ts.timestamps, utc=True).tz_convert(None)
-        octopus_dict = dict(zip(oct_datetimes.tolist(), octopus_ts.values))
+        octopus_dict = dict(zip(oct_datetimes.tolist(), octopus_ts.values, strict=True))
     except OctopusEnergyError:
         pass  # Fall back to pure forecast if Octopus is unavailable
 
-    now_utc = pd.Timestamp(datetime.now(tz=timezone.utc)).tz_convert(None)
+    now_utc = pd.Timestamp(datetime.now(tz=UTC)).tz_convert(None)
     all_timestamps: list[pd.Timestamp] = sorted(
         ts for ts in (set(agile_ts_list) | set(octopus_dict.keys())) if ts >= now_utc
     )
@@ -554,7 +556,7 @@ def plot_simulation_results(result: SimulationResult) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _build_optimisation_plot(
+def _build_optimisation_plot(  # noqa: C901
     step: GreedyStep,
     baseline_rh: list[float] | None = None,
     merged_forecast: MergedEnergyForecast | None = None,
@@ -676,13 +678,9 @@ def _build_optimisation_plot(
         if merged_forecast.forecast_timestamps:
             # P10/P90 shaded band rendered as a closed polygon
             if merged_forecast.forecast_values_low and merged_forecast.forecast_values_high:
-                band_x = (
-                    list(merged_forecast.forecast_timestamps)
-                    + list(reversed(merged_forecast.forecast_timestamps))
-                )
-                band_y = (
-                    list(merged_forecast.forecast_values_high)
-                    + list(reversed(merged_forecast.forecast_values_low))
+                band_x = list(merged_forecast.forecast_timestamps) + list(reversed(merged_forecast.forecast_timestamps))
+                band_y = list(merged_forecast.forecast_values_high) + list(
+                    reversed(merged_forecast.forecast_values_low)
                 )
                 fig.add_trace(
                     go.Scatter(
@@ -902,18 +900,20 @@ def _trim_ambient_to_future(
     except Exception:  # noqa: BLE001
         now_local = datetime.now()
 
-    triples = [(t, r, te) for t, r, te in zip(times, rh, temp) if t >= now_local]
+    triples = [(t, r, te) for t, r, te in zip(times, rh, temp, strict=True) if t >= now_local]
     if not triples:
         return [], [], []
-    ft, fr, fte = zip(*triples)
+    ft, fr, fte = zip(*triples, strict=True)
     return list(ft), list(fr), list(fte)
 
 
 def _trim_source_to_future(source: HumiditySource) -> HumiditySource:
     """Drop any source emissions slots whose timestamp is before the current UTC moment."""
-    now_utc = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    now_utc = datetime.now(tz=UTC).replace(tzinfo=None)
     fmt = source.timestamp_format
-    future = [(ts, v) for ts, v in zip(source.timestamps, source.values) if datetime.strptime(ts, fmt) >= now_utc]
+    future = [
+        (ts, v) for ts, v in zip(source.timestamps, source.values, strict=True) if datetime.strptime(ts, fmt) >= now_utc
+    ]
     ts_list = [ts for ts, _ in future]
     val_list = [v for _, v in future]
     return HumiditySource(
