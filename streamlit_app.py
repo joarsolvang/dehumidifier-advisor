@@ -889,6 +889,44 @@ def _run_optimisation(
         st.error(f"Optimisation error: {e}")
 
 
+def _trim_ambient_to_future(
+    times: list[datetime],
+    rh: list[float],
+    temp: list[float],
+    forecast_timezone: str,
+) -> tuple[list[datetime], list[float], list[float]]:
+    """Drop any hourly slots whose timestamp is before the current moment."""
+    try:
+        tz = ZoneInfo(forecast_timezone)
+        now_local = datetime.now(tz=tz).replace(tzinfo=None)
+    except Exception:  # noqa: BLE001
+        now_local = datetime.now()
+
+    triples = [(t, r, te) for t, r, te in zip(times, rh, temp) if t >= now_local]
+    if not triples:
+        return [], [], []
+    ft, fr, fte = zip(*triples)
+    return list(ft), list(fr), list(fte)
+
+
+def _trim_source_to_future(source: HumiditySource) -> HumiditySource:
+    """Drop any source emissions slots whose timestamp is before the current UTC moment."""
+    now_utc = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    fmt = source.timestamp_format
+    future = [(ts, v) for ts, v in zip(source.timestamps, source.values) if datetime.strptime(ts, fmt) >= now_utc]
+    ts_list = [ts for ts, _ in future]
+    val_list = [v for _, v in future]
+    return HumiditySource(
+        name=source.name,
+        max_emissions_rate_unit=source.max_emissions_rate_unit,
+        timestamps=ts_list,
+        timestamp_format=source.timestamp_format,
+        timezone=source.timezone,
+        values=val_list,
+        values_unit=source.values_unit,
+    )
+
+
 def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp: str) -> None:
     """Display the optimisation tab — reads configuration from session state set in Configuration tab."""
     if st.button("Run Optimisation", use_container_width=True, type="primary"):
@@ -917,6 +955,13 @@ def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp
                 f"Using {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict "
                 "(Octopus actual prices unavailable)."
             )
+
+        hourly_times, hourly_rh, hourly_temp = _trim_ambient_to_future(
+            forecast.hourly.time,
+            forecast.hourly.relative_humidity_2m,
+            forecast.hourly.temperature_2m,
+            forecast.timezone,
+        )
 
         ambient_conditions = AmbientConditions(
             name="External Conditions",
