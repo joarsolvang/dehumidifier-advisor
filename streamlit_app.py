@@ -1425,7 +1425,7 @@ def main() -> None:
     with st.sidebar:
         # Location input form
         with st.form("location_form"):
-            st.subheader("🔍 Enter Location")
+            st.subheader("🔍 Weather Forecast Location")
 
             city = st.text_input("City", placeholder="e.g., London")
             country = st.text_input("Country", placeholder="e.g., United Kingdom")
@@ -1446,15 +1446,7 @@ def main() -> None:
         st.divider()
 
         # Forecast settings
-        st.header("⚙️ Forecast Settings")
-
-        forecast_days = st.slider(
-            "Forecast Duration (days)",
-            min_value=1,
-            max_value=16,
-            value=7,
-            help="Number of days to forecast (API limit: 1-16)",
-        )
+        st.subheader("⚙️ Electricity Region (GSP)")
 
         gsp = st.selectbox(
             "Electricity Region (GSP)",
@@ -1462,6 +1454,20 @@ def main() -> None:
             format_func=lambda k: _GSP_REGIONS[k],
             index=6,  # Default: G - North West England
             help="UK Grid Supply Point region for Agile electricity price forecasts",
+            label_visibility="collapsed",
+        )
+
+        st.divider()
+
+        st.subheader("⚙️ Forecast Duration")
+
+        forecast_days = st.slider(
+            "Forecast Duration (days)",
+            min_value=1,
+            max_value=16,
+            value=7,
+            help="Number of days to forecast (API limit: 1-16)",
+            label_visibility="collapsed",
         )
 
         st.divider()
