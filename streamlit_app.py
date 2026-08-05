@@ -1,5 +1,6 @@
 """Streamlit dashboard for dehumidifier humidity forecasting."""
 
+import os
 import time
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
@@ -10,7 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from agile_predict_api import AgilePredictClient, AgilePredictError, EnergyForecast, EnergyForecastTimeSeries
+from agile_predict_api import AgilePredictClient, AgilePredictError, EnergyForecast
 from dehumidifier_adviser import (
     Geocoder,
     GeocodingServiceError,
@@ -57,6 +58,12 @@ DEFAULT_LOCATION = Location(
     longitude=-0.1278,
     display_name="London, Greater London, England, United Kingdom",
 )
+
+# Simulator API base URL. Server-side config only (env var), never a user-editable UI
+# field — the value is used to make outbound HTTP requests from the Streamlit server,
+# so accepting it from visitor input would allow SSRF (e.g. probing internal services
+# or cloud metadata endpoints).
+SIMULATOR_API_URL = os.environ.get("SIMULATOR_API_URL", HumiditySimulatorClient.DEFAULT_BASE_URL)
 
 
 def get_weather_icon_and_description(weather_code: int) -> tuple[str, str]:
@@ -315,26 +322,64 @@ def build_merged_energy_forecast(gsp: str, forecast_days: int) -> MergedEnergyFo
     )
 
 
-def plot_electricity_prices(timeseries: EnergyForecastTimeSeries) -> None:
-    """Create and display a half-hourly electricity price line chart.
+def plot_merged_electricity_prices(merged_forecast: MergedEnergyForecast) -> None:
+    """Create and display a half-hourly electricity price chart from merged actual/forecast data.
+
+    Mirrors the price panel shown on the Optimisation tab: solid line for actual (Octopus)
+    prices, dashed line with a shaded p10/p90 band for forecast (Agile Predict) prices.
 
     Args:
-        timeseries: AgileRatesTimeSeries with timestamps and prices
+        merged_forecast: MergedEnergyForecast with actual and forecast price slices
     """
-    df = pd.DataFrame({"time": pd.to_datetime(timeseries.timestamps), "price": timeseries.values})
+    fig = go.Figure()
 
-    fig = px.line(
-        df,
-        x="time",
-        y="price",
-        title="Agile Electricity Price Forecast",
-        labels={"time": "Time", "price": "Price (p/kWh inc VAT)"},
-        markers=True,
-    )
+    if merged_forecast.actual_timestamps:
+        fig.add_trace(
+            go.Scatter(
+                x=merged_forecast.actual_timestamps,
+                y=merged_forecast.actual_values,
+                name="Octopus Agile Pricing (actual)",
+                line={"color": "steelblue", "width": 1.5},
+                mode="lines+markers",
+                marker={"size": 4},
+            )
+        )
+
+    if merged_forecast.forecast_timestamps:
+        if merged_forecast.forecast_values_low and merged_forecast.forecast_values_high:
+            band_x = list(merged_forecast.forecast_timestamps) + list(reversed(merged_forecast.forecast_timestamps))
+            band_y = list(merged_forecast.forecast_values_high) + list(reversed(merged_forecast.forecast_values_low))
+            fig.add_trace(
+                go.Scatter(
+                    x=band_x,
+                    y=band_y,
+                    fill="toself",
+                    fillcolor="rgba(70, 130, 180, 0.15)",
+                    line={"width": 0},
+                    mode="lines",
+                    showlegend=False,
+                    hoverinfo="skip",
+                )
+            )
+
+        fig.add_trace(
+            go.Scatter(
+                x=merged_forecast.forecast_timestamps,
+                y=merged_forecast.forecast_values,
+                name="Agile Predict (forecast)",
+                line={"color": "steelblue", "width": 1.5, "dash": "dash"},
+                mode="lines+markers",
+                marker={"size": 4},
+            )
+        )
 
     fig.update_layout(
+        title="Agile Electricity Price Forecast",
+        xaxis_title="Time",
+        yaxis_title="Price (p/kWh inc VAT)",
         hovermode="x unified",
         template="plotly_white",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -999,8 +1044,7 @@ def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp
             ),
         )
 
-        simulator_url = st.session_state.get("simulator_api_url", HumiditySimulatorClient.DEFAULT_BASE_URL)
-        _run_optimisation(HumiditySimulatorClient(base_url=simulator_url), request, merged_forecast)
+        _run_optimisation(HumiditySimulatorClient(base_url=SIMULATOR_API_URL), request, merged_forecast)
 
 
 _SCENARIO_DESCRIPTIONS: dict[str, str] = {
@@ -1117,8 +1161,7 @@ def _run_simulation(
         external_ambient_conditions=ambient_conditions,
     )
 
-    simulator_url = st.session_state.get("simulator_api_url", HumiditySimulatorClient.DEFAULT_BASE_URL)
-    client = HumiditySimulatorClient(base_url=simulator_url)
+    client = HumiditySimulatorClient(base_url=SIMULATOR_API_URL)
 
     try:
         with st.spinner("Running simulation..."):
@@ -1135,7 +1178,7 @@ def _run_simulation(
 
     except SimulatorConnectionError:
         st.error(
-            f"Cannot connect to the humidity simulator API at **{simulator_url}**.\n\n"
+            f"Cannot connect to the humidity simulator API at **{SIMULATOR_API_URL}**.\n\n"
             "Make sure the simulator container is running:\n"
             "```\ncd humidity-simulator && docker compose up -d --build\n```"
         )
@@ -1346,10 +1389,22 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
             plot_hourly_temperature(forecast)
         else:  # Electricity Price
             try:
-                agile_ts = get_agile_predict_cached(gsp=gsp, forecast_days=forecast_days).to_timeseries()
-                plot_electricity_prices(agile_ts)
+                with st.spinner("Loading electricity prices..."):
+                    merged_forecast = build_merged_energy_forecast(gsp=gsp, forecast_days=forecast_days)
             except AgilePredictError as e:
                 st.warning(f"Could not load electricity prices: {e}")
+            else:
+                if merged_forecast.actual_timestamps:
+                    st.caption(
+                        f"Using {len(merged_forecast.actual_timestamps)} actual price slots from Octopus Energy "
+                        f"and {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict."
+                    )
+                else:
+                    st.caption(
+                        f"Using {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict "
+                        "(Octopus actual prices unavailable)."
+                    )
+                plot_merged_electricity_prices(merged_forecast)
 
     # Tab 3: Configuration
     with tab3:
@@ -1370,7 +1425,7 @@ def main() -> None:
     with st.sidebar:
         # Location input form
         with st.form("location_form"):
-            st.subheader("🔍 Enter Location")
+            st.subheader("🔍 Weather Forecast Location")
 
             city = st.text_input("City", placeholder="e.g., London")
             country = st.text_input("Country", placeholder="e.g., United Kingdom")
@@ -1391,15 +1446,7 @@ def main() -> None:
         st.divider()
 
         # Forecast settings
-        st.header("⚙️ Forecast Settings")
-
-        forecast_days = st.slider(
-            "Forecast Duration (days)",
-            min_value=1,
-            max_value=16,
-            value=7,
-            help="Number of days to forecast (API limit: 1-16)",
-        )
+        st.subheader("⚙️ Electricity Region (GSP)")
 
         gsp = st.selectbox(
             "Electricity Region (GSP)",
@@ -1407,16 +1454,20 @@ def main() -> None:
             format_func=lambda k: _GSP_REGIONS[k],
             index=6,  # Default: G - North West England
             help="UK Grid Supply Point region for Agile electricity price forecasts",
+            label_visibility="collapsed",
         )
 
         st.divider()
 
-        st.header("🔬 Simulator Settings")
-        st.text_input(
-            "Simulator API URL",
-            value=HumiditySimulatorClient.DEFAULT_BASE_URL,
-            key="simulator_api_url",
-            help="URL of the humidity-simulator API (default: http://localhost:8000)",
+        st.subheader("⚙️ Forecast Duration")
+
+        forecast_days = st.slider(
+            "Forecast Duration (days)",
+            min_value=1,
+            max_value=16,
+            value=7,
+            help="Number of days to forecast (API limit: 1-16)",
+            label_visibility="collapsed",
         )
 
         st.divider()
