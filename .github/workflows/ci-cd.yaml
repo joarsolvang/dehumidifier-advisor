@@ -102,4 +102,5 @@ jobs:
           az containerapp update \
             --name ca-tork-streamlit \
             --resource-group rg-tork-prod \
-            --image acrtork.azurecr.io/tork/streamlit:${{ github.sha }}
+            --image acrtork.azurecr.io/tork/streamlit:${{ github.sha }} \
+            --output none
