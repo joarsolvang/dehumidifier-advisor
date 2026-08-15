@@ -1,0 +1,47 @@
+# Git
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.python-version
+
+# Linting/Type checking caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Testing/Coverage
+tests/
+htmlcov/
+.coverage
+
+# Project specific
+notebook/
+.claude/
+data/
+
+# Documentation (except README which is needed for build)
+docs/
+*.md
+!README.md
+*.png
+
+# Docker (not needed inside container)
+docker-compose.yml
+Dockerfile
+
+# OS files
+.DS_Store
+
+# Local config
+.env
