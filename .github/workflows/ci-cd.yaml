@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 on:
   workflow_dispatch:
@@ -70,3 +70,36 @@ jobs:
     steps:
       - name: All checks passed
         run: echo "✅ All Checks Passed"
+
+  deploy:
+    name: Deploy to Azure Container Apps
+    needs: [all]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Log in to ACR
+        run: az acr login --name acrtork
+
+      - name: Build and push image
+        run: |
+          docker build \
+            -t acrtork.azurecr.io/tork/streamlit:${{ github.sha }} \
+            -t acrtork.azurecr.io/tork/streamlit:latest \
+            .
+          docker push acrtork.azurecr.io/tork/streamlit:${{ github.sha }}
+          docker push acrtork.azurecr.io/tork/streamlit:latest
+
+      - name: Deploy new revision
+        run: |
+          az containerapp update \
+            --name ca-tork-streamlit \
+            --resource-group rg-tork-prod \
+            --image acrtork.azurecr.io/tork/streamlit:${{ github.sha }}
