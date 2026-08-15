@@ -28,7 +28,7 @@ class HumiditySimulatorClient:
 
     DEFAULT_BASE_URL: ClassVar[str] = "http://localhost:8000"
 
-    def __init__(self, base_url: str = DEFAULT_BASE_URL, timeout: float = 30.0) -> None:
+    def __init__(self, base_url: str = DEFAULT_BASE_URL, timeout: float = 90.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
