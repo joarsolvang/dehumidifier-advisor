@@ -9,25 +9,23 @@ from humidity_simulator_client.models import (
     AmbientConditions,
     DehumidifierSpec,
     EnergyForecastTimeSeries,
-    GreedyStep,
     HumiditySource,
     OptimisationRequest,
+    OptimisationResult,
     SimulationRequest,
     SimulationResult,
-    StepsResponse,
 )
 
 __all__ = [
     "AmbientConditions",
     "DehumidifierSpec",
     "EnergyForecastTimeSeries",
-    "GreedyStep",
     "HumiditySimulatorClient",
     "HumiditySource",
     "OptimisationRequest",
+    "OptimisationResult",
     "SimulationRequest",
     "SimulationResult",
     "SimulatorConnectionError",
     "SimulatorError",
-    "StepsResponse",
 ]

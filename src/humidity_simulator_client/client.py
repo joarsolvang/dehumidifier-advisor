@@ -1,18 +1,15 @@
 """Humidity simulator API client."""
 
-import time
 from typing import ClassVar
 
 import httpx
 
 from humidity_simulator_client.models import (
     OptimisationRequest,
+    OptimisationResult,
     SimulationRequest,
     SimulationResult,
-    StepsResponse,
 )
-
-_POLL_INTERVAL = 0.5
 
 
 class SimulatorError(Exception):
@@ -28,90 +25,36 @@ class HumiditySimulatorClient:
 
     DEFAULT_BASE_URL: ClassVar[str] = "http://localhost:8000"
 
-    def __init__(self, base_url: str = DEFAULT_BASE_URL, timeout: float = 90.0) -> None:
+    def __init__(self, base_url: str = DEFAULT_BASE_URL, api_key: str | None = None, timeout: float = 120.0) -> None:
         self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
         self.timeout = timeout
 
-    def simulate(self, request: SimulationRequest) -> SimulationResult:
-        """Submit a simulation job and poll until complete, then return the result."""
+    def _headers(self) -> dict[str, str]:
+        return {"x-functions-key": self.api_key} if self.api_key else {}
+
+    def _post(self, path: str, json: dict) -> httpx.Response:
         try:
             with httpx.Client(timeout=self.timeout) as client:
-                job_id = self._submit_job(client, request)
-                return self._poll_result(client, job_id)
-        except httpx.ConnectError as e:
-            msg = f"Cannot connect to simulator API at {self.base_url}. Is the container running?"
-            raise SimulatorConnectionError(msg) from e
-        except httpx.HTTPStatusError as e:
-            msg = f"Simulator API error: {e.response.status_code} - {e.response.text}"
-            raise SimulatorError(msg) from e
-        except httpx.HTTPError as e:
-            msg = f"HTTP error communicating with simulator: {e}"
-            raise SimulatorError(msg) from e
-
-    def _submit_job(self, client: httpx.Client, request: SimulationRequest) -> str:
-        response = client.post(
-            f"{self.base_url}/simulate/jobs",
-            json=request.model_dump(),
-        )
-        response.raise_for_status()
-        return response.json()["job_id"]  # type: ignore[no-any-return]
-
-    def submit_optimisation(self, request: OptimisationRequest) -> str:
-        """Submit an optimisation job and return the job ID."""
-        try:
-            with httpx.Client(timeout=self.timeout) as client:
-                response = client.post(
-                    f"{self.base_url}/optimisation/jobs",
-                    json=request.model_dump(),
-                )
-                response.raise_for_status()
-                return response.json()["job_id"]  # type: ignore[no-any-return]
-        except httpx.ConnectError as e:
-            msg = f"Cannot connect to simulator API at {self.base_url}. Is the container running?"
-            raise SimulatorConnectionError(msg) from e
-        except httpx.HTTPStatusError as e:
-            msg = f"Simulator API error: {e.response.status_code} - {e.response.text}"
-            raise SimulatorError(msg) from e
-        except httpx.HTTPError as e:
-            msg = f"HTTP error communicating with simulator: {e}"
-            raise SimulatorError(msg) from e
-
-    def get_optimisation_steps(self, job_id: str, from_index: int = 0) -> StepsResponse:
-        """Fetch optimisation steps from a given index."""
-        try:
-            with httpx.Client(timeout=self.timeout) as client:
-                response = client.get(
-                    f"{self.base_url}/optimisation/jobs/{job_id}/steps",
-                    params={"from_index": from_index},
-                )
-                response.raise_for_status()
-                return StepsResponse.model_validate(response.json())
-        except httpx.ConnectError as e:
-            msg = f"Cannot connect to simulator API at {self.base_url}. Is the container running?"
-            raise SimulatorConnectionError(msg) from e
-        except httpx.HTTPStatusError as e:
-            msg = f"Simulator API error: {e.response.status_code} - {e.response.text}"
-            raise SimulatorError(msg) from e
-        except httpx.HTTPError as e:
-            msg = f"HTTP error communicating with simulator: {e}"
-            raise SimulatorError(msg) from e
-
-    def _poll_result(self, client: httpx.Client, job_id: str) -> SimulationResult:
-        deadline = time.monotonic() + self.timeout
-        while time.monotonic() < deadline:
-            response = client.get(f"{self.base_url}/simulate/jobs/{job_id}/result")
-            if response.status_code == 404:
-                # Worker hasn't picked up the job yet — retry
-                time.sleep(_POLL_INTERVAL)
-                continue
+                response = client.post(f"{self.base_url}{path}", json=json, headers=self._headers())
             response.raise_for_status()
-            data = response.json()
+            return response
+        except httpx.ConnectError as e:
+            msg = f"Cannot connect to simulator API at {self.base_url}."
+            raise SimulatorConnectionError(msg) from e
+        except httpx.HTTPStatusError as e:
+            msg = f"Simulator API error: {e.response.status_code} - {e.response.text}"
+            raise SimulatorError(msg) from e
+        except httpx.HTTPError as e:
+            msg = f"HTTP error communicating with simulator: {e}"
+            raise SimulatorError(msg) from e
 
-            if data["status"] == "complete":
-                return SimulationResult.model_validate(data["result"])
-            if data["status"] == "error":
-                raise SimulatorError(f"Simulation job failed: {data.get('error', 'Unknown error')}")
+    def simulate(self, request: SimulationRequest) -> SimulationResult:
+        """Run a simulation and return the result."""
+        response = self._post("/simulate", request.model_dump())
+        return SimulationResult.model_validate(response.json())
 
-            time.sleep(_POLL_INTERVAL)
-
-        raise SimulatorError(f"Simulation job {job_id!r} timed out after {self.timeout}s")
+    def optimise(self, request: OptimisationRequest) -> OptimisationResult:
+        """Run the optimiser and return the final accepted schedule."""
+        response = self._post("/optimisation", request.model_dump())
+        return OptimisationResult.model_validate(response.json())

@@ -1,7 +1,6 @@
 """Streamlit dashboard for dehumidifier humidity forecasting."""
 
 import os
-import time
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
@@ -25,15 +24,14 @@ from dehumidifier_adviser.scenarios import SCENARIO_FACTORIES
 from humidity_simulator_client import (
     AmbientConditions,
     DehumidifierSpec,
-    GreedyStep,
     HumiditySimulatorClient,
     HumiditySource,
     OptimisationRequest,
+    OptimisationResult,
     SimulationRequest,
     SimulationResult,
     SimulatorConnectionError,
     SimulatorError,
-    StepsResponse,
 )
 from humidity_simulator_client import (
     EnergyForecastTimeSeries as OptimisationEnergyForecast,
@@ -64,6 +62,7 @@ DEFAULT_LOCATION = Location(
 # so accepting it from visitor input would allow SSRF (e.g. probing internal services
 # or cloud metadata endpoints).
 SIMULATOR_API_URL = os.environ.get("SIMULATOR_API_URL", HumiditySimulatorClient.DEFAULT_BASE_URL)
+SIMULATOR_API_KEY = os.environ.get("SIMULATOR_API_KEY")
 
 
 def get_weather_icon_and_description(weather_code: int) -> tuple[str, str]:
@@ -602,7 +601,7 @@ def plot_simulation_results(result: SimulationResult) -> None:
 
 
 def _build_optimisation_plot(  # noqa: C901
-    step: GreedyStep,
+    step: OptimisationResult,
     baseline_rh: list[float] | None = None,
     merged_forecast: MergedEnergyForecast | None = None,
 ) -> go.Figure:
@@ -789,59 +788,6 @@ def _build_optimisation_plot(  # noqa: C901
     return fig
 
 
-def _build_price_plot(step: GreedyStep, energy_forecast: OptimisationEnergyForecast) -> go.Figure:
-    """Build an electricity price chart with the dehumidifier schedule highlighted."""
-    price_fmt = energy_forecast.timestamp_format
-    if price_fmt.replace(" ", "") == "ISO8601":
-        price_ts = pd.to_datetime(energy_forecast.timestamps, utc=True).tz_convert(None)
-    else:
-        price_ts = pd.to_datetime(energy_forecast.timestamps, format=price_fmt)
-        if price_ts.tz is not None:
-            price_ts = price_ts.tz_convert(None)
-
-    sim_timestamps = pd.to_datetime(step.simulation_result.timestamps)
-    schedule = step.schedule
-    delta = sim_timestamps[1] - sim_timestamps[0] if len(sim_timestamps) > 1 else pd.Timedelta("30min")
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            x=price_ts,
-            y=energy_forecast.values,
-            name="Price (p/kWh)",
-            line={"color": "darkorange", "width": 1.5},
-        )
-    )
-
-    i, n = 0, len(schedule)
-    while i < n:
-        if schedule[i] == 1:
-            j = i
-            while j < n and schedule[j] == 1:
-                j += 1
-            fig.add_vrect(
-                x0=sim_timestamps[i],
-                x1=sim_timestamps[j - 1] + delta,
-                fillcolor="green",
-                opacity=0.15,
-                line_width=0,
-            )
-            i = j
-        else:
-            i += 1
-
-    fig.update_layout(
-        yaxis={"title": "Price (p/kWh)"},
-        hovermode="x unified",
-        template="plotly_white",
-        showlegend=True,
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
-    )
-
-    return fig
-
-
 def _baseline_simulation_request(request: OptimisationRequest) -> SimulationRequest:
     """Build a plain SimulationRequest from an OptimisationRequest (strips dehumidifier/energy fields)."""
     return SimulationRequest(
@@ -858,22 +804,10 @@ def _baseline_simulation_request(request: OptimisationRequest) -> SimulationRequ
     )
 
 
-def _submit_optimisation_job(client: HumiditySimulatorClient, request: OptimisationRequest) -> str | None:
-    """Submit an optimisation job; displays any error and returns None on failure."""
-    try:
-        with st.spinner("Submitting optimisation job..."):
-            return client.submit_optimisation(request)
-    except SimulatorConnectionError as e:
-        st.error(f"❌ {e}")
-    except SimulatorError as e:
-        st.error(f"Optimisation error: {e}")
-    return None
-
-
 def _run_optimisation(
     client: HumiditySimulatorClient, request: OptimisationRequest, merged_forecast: MergedEnergyForecast
 ) -> None:
-    """Run baseline simulation then submit optimisation job, live-updating the UI with each step."""
+    """Run a baseline simulation, then run the optimiser and display the final result."""
     baseline_rh: list[float] | None = None
     try:
         with st.spinner("Running baseline simulation..."):
@@ -884,52 +818,21 @@ def _run_optimisation(
     except SimulatorError as e:
         st.warning(f"Baseline simulation failed — chart will not show unoptimised line: {e}")
 
-    job_id = _submit_optimisation_job(client, request)
-    if job_id is None:
-        return
-
-    status_placeholder = st.empty()
-    metric_placeholder = st.empty()
-    plot_placeholder = st.empty()
-
-    status_placeholder.info("Waiting for first result...")
-
-    steps_seen = 0
-    latest_step: GreedyStep | None = None
-
     try:
-        while True:
-            response: StepsResponse = client.get_optimisation_steps(job_id, from_index=steps_seen)
-
-            for step in response.steps:
-                latest_step = step
-                steps_seen += 1
-
-            if latest_step is not None:
-                n_total = latest_step.n_total
-                pct = steps_seen / n_total
-                label = (
-                    f"Complete — {steps_seen} / {n_total} steps"
-                    if response.complete
-                    else f"Step {steps_seen} / {n_total} ({pct:.0%})"
-                )
-                status_placeholder.progress(pct, text=label)
-                metric_placeholder.metric("Best Objective", f"£{latest_step.objective / 100:.2f}")
-                plot_placeholder.plotly_chart(
-                    _build_optimisation_plot(latest_step, baseline_rh, merged_forecast),
-                    use_container_width=True,
-                    key=f"opt_plot_{steps_seen}",
-                )
-
-            if response.complete:
-                if response.error:
-                    st.error(f"Optimisation failed: {response.error}")
-                break
-
-            time.sleep(0.5)
-
+        with st.spinner("Running optimisation..."):
+            result = client.optimise(request)
+    except SimulatorConnectionError as e:
+        st.error(f"❌ {e}")
+        return
     except SimulatorError as e:
         st.error(f"Optimisation error: {e}")
+        return
+
+    st.metric("Best Objective", f"£{result.objective / 100:.2f}")
+    st.plotly_chart(
+        _build_optimisation_plot(result, baseline_rh, merged_forecast),
+        use_container_width=True,
+    )
 
 
 def _trim_ambient_to_future(
@@ -1044,7 +947,8 @@ def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp
             ),
         )
 
-        _run_optimisation(HumiditySimulatorClient(base_url=SIMULATOR_API_URL), request, merged_forecast)
+        client = HumiditySimulatorClient(base_url=SIMULATOR_API_URL, api_key=SIMULATOR_API_KEY)
+        _run_optimisation(client, request, merged_forecast)
 
 
 _SCENARIO_DESCRIPTIONS: dict[str, str] = {
@@ -1161,7 +1065,7 @@ def _run_simulation(
         external_ambient_conditions=ambient_conditions,
     )
 
-    client = HumiditySimulatorClient(base_url=SIMULATOR_API_URL)
+    client = HumiditySimulatorClient(base_url=SIMULATOR_API_URL, api_key=SIMULATOR_API_KEY)
 
     try:
         with st.spinner("Running simulation..."):
