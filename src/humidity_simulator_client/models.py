@@ -80,21 +80,9 @@ class OptimisationRequest(SimulationRequest):
     dehumidifier: DehumidifierSpec
 
 
-class GreedyStep(BaseModel):
-    """State snapshot yielded after each attempted greedy turn-off."""
+class OptimisationResult(BaseModel):
+    """Final accepted schedule and simulation result from a completed optimisation run."""
 
-    iteration: int
-    n_total: int
     schedule: list[int]
     objective: float
     simulation_result: SimulationResult
-    accepted: bool
-
-
-class StepsResponse(BaseModel):
-    """Response from the optimisation steps polling endpoint."""
-
-    job_id: str
-    steps: list[GreedyStep]
-    complete: bool
-    error: str | None = None
