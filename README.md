@@ -14,7 +14,9 @@ uv run streamlit run streamlit_app.py
 
 The dashboard will open in your browser at `http://localhost:8501`.
 
-Once complete, a I'll look to host the platform (and accompanying optimisation API) publicly for easier access.
+Deployed on [Streamlit Community Cloud](https://streamlit.io/cloud), talking
+to the `humidity-simulator` API on Azure Functions. Set `SIMULATOR_API_URL`
+and `SIMULATOR_API_KEY` as Streamlit Cloud secrets.
 
 
 ## Development
