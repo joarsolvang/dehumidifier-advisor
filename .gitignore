@@ -175,3 +175,6 @@ cython_debug/
 /.claude
 *.md
 *.png
+
+# Streamlit secrets (holds SIMULATOR_API_KEY when running locally)
+.streamlit/secrets.toml
