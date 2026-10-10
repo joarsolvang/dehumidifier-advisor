@@ -1145,25 +1145,13 @@ def get_location_to_display() -> Location | None:
     return DEFAULT_LOCATION
 
 
-def display_location_box(location: Location, gsp: str) -> None:
-    """Display the selected location and its Grid Supply Point in a bordered box."""
-    state_html = (
-        f'<p style="font-size: 0.9em; font-style: italic; margin: 5px 0;">{location.state}</p>'
-        if location.state
-        else ""
-    )
+def display_location_box(location: Location) -> None:
+    """Display the selected location's city and country in a bordered box."""
     st.markdown(
         f"""
-        <div style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 20px;
-                    text-align: center; height: 180px; display: flex;
-                    flex-direction: column; justify-content: center;">
+        <div style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 12px; text-align: center;">
             <p style="font-size: 1.2em; font-weight: bold; margin: 5px 0;">{location.city}</p>
             <p style="font-size: 1em; margin: 5px 0;">{location.country}</p>
-            {state_html}
-            <p style="font-size: 0.8em; color: #666; margin: 5px 0;">
-                {location.latitude:.4f}, {location.longitude:.4f}
-            </p>
-            <p style="font-size: 0.9em; margin: 5px 0;">Grid Supply Point: {_GSP_REGIONS[gsp]}</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1189,17 +1177,15 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
     tab_optimisation, tab_configuration = st.tabs(["Optimisation", "Configuration"])
 
     with tab_optimisation:
-        # Humidity forecast on the left, map and location on the right
+        # Humidity forecast on the left, map on the right
         col_forecasts, col_map = st.columns([3, 2])
 
         # Each chart sits in its own bordered box
         with col_forecasts, st.container(border=True):
             display_humidity_forecast(forecast, forecast_days)
 
-        with col_map:
-            with st.container(border=True):
-                st.plotly_chart(build_location_map(location, gsp), use_container_width=True)
-            display_location_box(location, gsp)
+        with col_map, st.container(border=True):
+            st.plotly_chart(build_location_map(location, gsp), use_container_width=True)
 
         with st.container(border=True):
             display_optimisation_tab(forecast, forecast_days, gsp)
@@ -1234,7 +1220,7 @@ def main() -> None:
     with st.sidebar:
         # Location input form
         with st.form("location_form"):
-            st.subheader("🔍 Weather Forecast Location")
+            st.subheader("🔍 Location Input")
 
             city = st.text_input("City", placeholder="e.g., London")
             country = st.text_input("Country", placeholder="e.g., United Kingdom")
@@ -1253,6 +1239,9 @@ def main() -> None:
                     }
 
         st.divider()
+
+        # Filled in below once the location has been resolved
+        location_container = st.container()
 
         # Filled in below only if the GSP cannot be found from the location
         gsp_fallback_container = st.container()
@@ -1292,6 +1281,10 @@ def main() -> None:
         if gsp is None:
             with gsp_fallback_container:
                 gsp = select_gsp_manually()
+        with location_container:
+            st.subheader("📍 Current Location")
+            display_location_box(location)
+            st.divider()
         display_weather_data(location, forecast_days, gsp)
 
 
