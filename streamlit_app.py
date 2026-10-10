@@ -962,8 +962,8 @@ def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp
 _SCENARIO_DESCRIPTIONS: dict[str, str] = {
     "1 Bed Flat": (
         "Single occupant flat.\n\n"
-        "- **Breathing** (80 g/h) continuously on weekdays and weekend mornings until noon\n"
-        "- **Shower** (1,200 g/h, 30 min) at 07:00 on weekdays and 09:00 on weekends\n"
+        "- **Occupancy** (80 g/h) continuously on weekdays and weekend mornings until noon\n"
+        "- **Showering** (1,200 g/h, 30 min) at 07:00 on weekdays and 09:00 on weekends\n"
         "- **Cooking** (600 g/h, 1 hr) on weekday evenings 18:00\u201319:00"
     ),
 }
