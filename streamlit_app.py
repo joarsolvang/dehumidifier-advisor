@@ -45,7 +45,6 @@ from octopus_energy_uk_api import AgileRatesTimeSeries, OctopusEnergyClient, Oct
 # Page configuration
 st.set_page_config(
     page_title="Tørk",
-    page_icon="🌧️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -369,7 +368,7 @@ def plot_daily_humidity(forecast: HumidityForecast) -> None:
         forecast: HumidityForecast object containing daily data
     """
     if forecast.daily is None:
-        st.warning("⚠️ No daily data available")
+        st.warning("No daily data available")
         return
 
     # Convert polars DataFrame to pandas for Plotly compatibility
@@ -416,14 +415,14 @@ def plot_daily_temperature(forecast: HumidityForecast) -> None:
         forecast: HumidityForecast object containing daily data
     """
     if forecast.daily is None:
-        st.warning("⚠️ No daily data available")
+        st.warning("No daily data available")
         return
 
     # Convert polars DataFrame to pandas for Plotly compatibility
     df = forecast.daily.to_dataframe().to_pandas()
 
     if "temperature_2m_mean" not in df.columns:
-        st.warning("⚠️ No temperature data available")
+        st.warning("No temperature data available")
         return
 
     # Calculate error bars (distance from mean to min/max)
@@ -722,7 +721,7 @@ def _run_optimisation(
         with st.spinner("Running baseline simulation..."):
             baseline_rh = client.simulate(_baseline_simulation_request(request)).relative_humidity
     except SimulatorConnectionError as e:
-        st.error(f"❌ {e}")
+        st.error(f"{e}")
         return
     except SimulatorError as e:
         st.warning(f"Baseline simulation failed — chart will not show unoptimised line: {e}")
@@ -731,7 +730,7 @@ def _run_optimisation(
         with st.spinner("Running optimisation..."):
             result = client.optimise(request)
     except SimulatorConnectionError as e:
-        st.error(f"❌ {e}")
+        st.error(f"{e}")
         return
     except SimulatorError as e:
         st.error(f"Optimisation error: {e}")
@@ -896,7 +895,7 @@ def display_humidity_forecast(forecast: HumidityForecast, forecast_days: int) ->
     """Display external and simulated internal humidity for the configured room, excluding humidity sources."""
     request = _build_room_simulation_request(forecast, forecast_days)
     if request is None:
-        st.warning("⚠️ Forecast data is missing hourly humidity or temperature")
+        st.warning("Forecast data is missing hourly humidity or temperature")
         return
 
     # Zero the source emissions rather than dropping the sources: the simulator returns an empty
@@ -923,14 +922,14 @@ def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp
     if st.button("Run Optimisation", use_container_width=True, type="primary"):
         simulation_request = _build_room_simulation_request(forecast, forecast_days)
         if simulation_request is None:
-            st.error("❌ Forecast data is missing hourly humidity or temperature — cannot run optimisation.")
+            st.error("Forecast data is missing hourly humidity or temperature — cannot run optimisation.")
             return
 
         try:
             with st.spinner("Loading electricity prices..."):
                 merged_forecast = build_merged_energy_forecast(gsp=gsp, forecast_days=forecast_days)
         except AgilePredictError as e:
-            st.error(f"❌ Could not load electricity prices: {e}")
+            st.error(f"Could not load electricity prices: {e}")
             return
 
         if merged_forecast.actual_timestamps:
@@ -1108,12 +1107,12 @@ def get_location_to_display() -> Location | None:
         loc_input = st.session_state.location_input
 
         try:
-            with st.spinner("🌍 Finding location..."):
+            with st.spinner("Finding location..."):
                 return get_location_cached(loc_input["city"], loc_input["country"])
 
         except LocationNotFoundError:
             st.error(
-                f"🔍 **Location not found:** '{loc_input['city']}, {loc_input['country']}'\n\n"
+                f"**Location not found:** '{loc_input['city']}, {loc_input['country']}'\n\n"
                 "**Suggestions:**\n"
                 "- Check spelling of city and country names\n"
                 "- Try using full country name (e.g., 'United Kingdom' not 'UK')"
@@ -1122,7 +1121,7 @@ def get_location_to_display() -> Location | None:
 
         except GeocodingServiceError as e:
             st.error(
-                f"🌐 **Geocoding service error:** {e}\n\n"
+                f"**Geocoding service error:** {e}\n\n"
                 "**Possible causes:**\n"
                 "- Network connectivity issues\n"
                 "- Service temporarily unavailable\n"
@@ -1136,7 +1135,7 @@ def get_location_to_display() -> Location | None:
             return None
 
         except Exception as e:  # noqa: BLE001
-            st.error(f"❌ **Unexpected error:** {e}\n\nPlease try again or contact support if the issue persists.")
+            st.error(f"**Unexpected error:** {e}\n\nPlease try again or contact support if the issue persists.")
             return None
 
     # Use default location on initial page load
@@ -1169,7 +1168,7 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
         with st.spinner(f"Loading {forecast_days}-day forecast..."):
             forecast = get_forecast_cached(location.latitude, location.longitude, forecast_days)
     except Exception as e:  # noqa: BLE001
-        st.error(f"❌ **Weather data error:** {e}")
+        st.error(f"**Weather data error:** {e}")
         return
 
     tab_optimisation, tab_configuration = st.tabs(["Optimisation", "Configuration"])
@@ -1194,7 +1193,7 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
 
 def select_gsp_manually() -> str:
     """Show a Grid Supply Point selector for locations outside every GSP region."""
-    st.subheader("⚙️ Grid Supply Point")
+    st.subheader("Grid Supply Point")
     st.warning("This location is outside the Grid Supply Point regions. Choose one for electricity prices.")
     gsp = st.selectbox(
         "Grid Supply Point",
@@ -1222,7 +1221,7 @@ def main() -> None:
     with st.sidebar:
         # Location input form
         with st.form("location_form"):
-            st.subheader("🔍 Location Input")
+            st.subheader("Location Input")
 
             city = st.text_input("City", placeholder="e.g., London")
             country = st.text_input("Country", placeholder="e.g., United Kingdom")
@@ -1231,7 +1230,7 @@ def main() -> None:
 
             if submit:
                 if not city or not country:
-                    st.error("❌ Please enter both city and country")
+                    st.error("Please enter both city and country")
                 else:
                     st.session_state.location_input = {
                         "city": city.strip(),
@@ -1246,7 +1245,7 @@ def main() -> None:
         # Filled in below only if the GSP cannot be found from the location
         gsp_fallback_container = st.container()
 
-        st.subheader("⚙️ Forecast Duration")
+        st.subheader("Forecast Duration")
 
         forecast_days = st.slider(
             "Forecast Duration (days)",
@@ -1282,7 +1281,7 @@ def main() -> None:
             with gsp_fallback_container:
                 gsp = select_gsp_manually()
         with location_container:
-            st.subheader("📍 Current Location")
+            st.subheader("Current Location")
             display_location_box(location)
             st.divider()
         display_weather_data(location, forecast_days, gsp)
