@@ -1212,7 +1212,11 @@ def main() -> None:
     """Main Streamlit application."""
     # Header
     st.title("Tørk")
-    st.markdown("Optimise your bills, optimise your drying, optimise your dehumidifier!")
+    st.markdown(
+        "The indoor environment and dehumidifiers can be managed to provide demand-side flexibility. "
+        "This offers cost savings to consumers and load shifting for the grid.\n\n"
+        "Run an optimisation to see how a forecast-aware dehumidifier controller might behave."
+    )
 
     # Sidebar with location input and settings
     with st.sidebar:
