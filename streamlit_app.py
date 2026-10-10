@@ -22,7 +22,7 @@ from dehumidifier_adviser import (
     LocationNotFoundError,
     OpenMeteoClient,
 )
-from dehumidifier_adviser.gsp import find_gsp
+from dehumidifier_adviser.gsp import LocationOutsideGridSupplyAreaError, require_gsp
 from dehumidifier_adviser.models import MergedEnergyForecast
 from dehumidifier_adviser.scenarios import SCENARIO_FACTORIES
 from humidity_simulator_client import (
@@ -1191,22 +1191,6 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
         display_configuration_tab()
 
 
-def select_gsp_manually() -> str:
-    """Show a Grid Supply Point selector for locations outside every GSP region."""
-    st.subheader("Grid Supply Point")
-    st.warning("This location is outside the Grid Supply Point regions. Choose one for electricity prices.")
-    gsp = st.selectbox(
-        "Grid Supply Point",
-        options=list(_GSP_REGIONS.keys()),
-        format_func=lambda k: _GSP_REGIONS[k],
-        index=6,  # Default: G - North West England
-        help="UK Grid Supply Point region for Agile electricity price forecasts",
-        label_visibility="collapsed",
-    )
-    st.divider()
-    return gsp
-
-
 def main() -> None:
     """Main Streamlit application."""
     # Header
@@ -1224,7 +1208,11 @@ def main() -> None:
             st.subheader("Location Input")
 
             city = st.text_input("City", placeholder="e.g., London")
-            country = st.text_input("Country", placeholder="e.g., United Kingdom")
+            country = st.text_input(
+                "Country",
+                placeholder="e.g., United Kingdom",
+                help="Only locations in England, Scotland and Wales are supported",
+            )
 
             submit = st.form_submit_button("Get Forecast", use_container_width=True)
 
@@ -1241,9 +1229,6 @@ def main() -> None:
 
         # Filled in below once the location has been resolved
         location_container = st.container()
-
-        # Filled in below only if the GSP cannot be found from the location
-        gsp_fallback_container = st.container()
 
         st.subheader("Forecast Duration")
 
@@ -1276,10 +1261,15 @@ def main() -> None:
 
     # Display weather data if location is available
     if location:
-        gsp = find_gsp(location.latitude, location.longitude, load_gsp_regions())
-        if gsp is None:
-            with gsp_fallback_container:
-                gsp = select_gsp_manually()
+        try:
+            gsp = require_gsp(location.latitude, location.longitude, load_gsp_regions())
+        except LocationOutsideGridSupplyAreaError:
+            st.error(
+                f"**Location not supported:** '{location.city}, {location.country}' is outside Great Britain.\n\n"
+                "Electricity prices are only available for England, Scotland and Wales. "
+                "Please enter a location there."
+            )
+            return
         with location_container:
             st.subheader("Current Location")
             display_location_box(location)

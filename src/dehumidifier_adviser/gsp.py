@@ -75,3 +75,30 @@ def find_gsp(latitude: float, longitude: float, regions: dict) -> str | None:
         for feature in features
     )
     return nearest if distance <= NEAREST_REGION_MAX_DISTANCE_KM else None
+
+
+class LocationOutsideGridSupplyAreaError(ValueError):
+    """Raised when a location is not covered by any GSP region (i.e. outside England, Scotland and Wales)."""
+
+
+def require_gsp(latitude: float, longitude: float, regions: dict) -> str:
+    """Find the GSP region letter (A-P) covering a location, raising if there is none.
+
+    Args:
+        latitude: Location latitude
+        longitude: Location longitude
+        regions: GeoJSON FeatureCollection with one feature per GSP region, each having a ``gsp`` property
+
+    Returns:
+        The GSP region letter
+
+    Raises:
+        LocationOutsideGridSupplyAreaError: If the location is not in (or near) any region
+    """
+    gsp = find_gsp(latitude, longitude, regions)
+    if gsp is None:
+        raise LocationOutsideGridSupplyAreaError(
+            f"Location ({latitude:.4f}, {longitude:.4f}) is outside the Grid Supply Point regions. "
+            "Only locations in England, Scotland and Wales are supported."
+        )
+    return gsp
