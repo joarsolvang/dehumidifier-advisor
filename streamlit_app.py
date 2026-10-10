@@ -828,7 +828,8 @@ def _run_optimisation(
         st.error(f"Optimisation error: {e}")
         return
 
-    st.metric("Best Objective", f"£{result.objective / 100:.2f}")
+    running_cost_pence = sum(result.simulation_result.dehumidifier_running_cost_pence or [])
+    st.metric("Running Cost", f"£{running_cost_pence / 100:.2f}")
     st.plotly_chart(
         _build_optimisation_plot(result, baseline_rh, merged_forecast),
         use_container_width=True,
