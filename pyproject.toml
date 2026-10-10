@@ -1,7 +1,7 @@
 [project]
 name = "dehumidifier-adviser"
 dynamic = ["version"]
-description = "Add your description here"
+description = "Forecast-aware dehumidifier scheduling for homes in Great Britain on time-of-use electricity tariffs"
 readme = "README.md"
 authors = [
     { name = "Your Name", email = "your.name@res-group.com" }
