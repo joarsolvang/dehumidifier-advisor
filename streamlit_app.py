@@ -70,13 +70,12 @@ SIMULATOR_API_KEY = os.environ.get("SIMULATOR_API_KEY")
 
 
 @st.cache_data(ttl=3600)  # Cache for 1 hour
-def get_location_cached(city: str, country: str, state: str | None) -> Location:
+def get_location_cached(city: str, country: str) -> Location:
     """Fetch and cache location data from geocoding API.
 
     Args:
         city: City name
         country: Country name
-        state: Optional state/region name
 
     Returns:
         Location object with coordinates and address details
@@ -86,7 +85,7 @@ def get_location_cached(city: str, country: str, state: str | None) -> Location:
         GeocodingServiceError: If service is unavailable
     """
     geocoder = Geocoder()
-    return geocoder.forward_geocode(city=city, country=country, state=state)
+    return geocoder.forward_geocode(city=city, country=country)
 
 
 @st.cache_data(ttl=1800)  # Cache for 30 minutes
@@ -1110,15 +1109,14 @@ def get_location_to_display() -> Location | None:
 
         try:
             with st.spinner("🌍 Finding location..."):
-                return get_location_cached(loc_input["city"], loc_input["country"], loc_input["state"])
+                return get_location_cached(loc_input["city"], loc_input["country"])
 
         except LocationNotFoundError:
             st.error(
                 f"🔍 **Location not found:** '{loc_input['city']}, {loc_input['country']}'\n\n"
                 "**Suggestions:**\n"
                 "- Check spelling of city and country names\n"
-                "- Try using full country name (e.g., 'United Kingdom' not 'UK')\n"
-                "- Add state/region for disambiguation (e.g., 'New York' state for 'New York' city)"
+                "- Try using full country name (e.g., 'United Kingdom' not 'UK')"
             )
             return None
 
@@ -1224,7 +1222,6 @@ def main() -> None:
 
             city = st.text_input("City", placeholder="e.g., London")
             country = st.text_input("Country", placeholder="e.g., United Kingdom")
-            state = st.text_input("State/Region (Optional)", placeholder="e.g., England")
 
             submit = st.form_submit_button("Get Forecast", use_container_width=True)
 
@@ -1235,7 +1232,6 @@ def main() -> None:
                     st.session_state.location_input = {
                         "city": city.strip(),
                         "country": country.strip(),
-                        "state": state.strip() if state else None,
                     }
 
         st.divider()
