@@ -7,11 +7,10 @@ Parked for now. This project looked to explore how the indoor environment and de
 
 ## How it works
 
-1. **Weather**: an hourly humidity and temperature forecast is fetched from [Open-Meteo](https://open-meteo.com/).
+1. **Weather**: humidity and temperature forecast is fetched from [Open-Meteo](https://open-meteo.com/).
 2. **Room simulation**: the accompanying [humidity-simulator](https://github.com/joarsolvang/humidity-simulator) API simulates the
    internal humidity of the room defined in the *Configuration* tab (size, temperature, ventilation, occupancy scenario).
-3. **Electricity prices**: Octopus Agile prices for the Grid Supply Point region, using published prices where available and
-   [Agile Predict](https://agilepredict.com) forecasts beyond that. Kudos to Agile Predict for the open service.
+3. **Electricity prices**: a combination of published Octopus Agile prices and [Agile Predict](https://agilepredict.com) forecasts are used to provide pricing data. Kudos to Agile Predict for the open service.
 4. **Optimisation**: The optimisation algorithm is simpler than initially intended. Implementing MILP became difficult due to the non-linearities and formulating the rate of change, which is intrinsically linked to the changing delta between the internal and external humidity. The current optimisation iterates over the simulation and does a reasonable job of balancing costs with penalties for exceeding maximum recommended humidity levels. 
 
 ## Running locally
