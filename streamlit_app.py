@@ -1,7 +1,10 @@
 """Streamlit dashboard for dehumidifier humidity forecasting."""
 
+import json
+import math
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -19,6 +22,7 @@ from dehumidifier_adviser import (
     LocationNotFoundError,
     OpenMeteoClient,
 )
+from dehumidifier_adviser.gsp import find_gsp
 from dehumidifier_adviser.models import MergedEnergyForecast
 from dehumidifier_adviser.scenarios import SCENARIO_FACTORIES
 from humidity_simulator_client import (
@@ -63,51 +67,6 @@ DEFAULT_LOCATION = Location(
 # or cloud metadata endpoints).
 SIMULATOR_API_URL = os.environ.get("SIMULATOR_API_URL", HumiditySimulatorClient.DEFAULT_BASE_URL)
 SIMULATOR_API_KEY = os.environ.get("SIMULATOR_API_KEY")
-
-
-def get_weather_icon_and_description(weather_code: int) -> tuple[str, str]:
-    """Map Open-Meteo WMO weather code to emoji icon and description.
-
-    Args:
-        weather_code: WMO weather interpretation code (0-99)
-
-    Returns:
-        Tuple of (emoji_icon, description_text)
-
-    WMO weather codes reference: https://open-meteo.com/en/docs
-    """
-    weather_mapping = {
-        0: ("☀️", "Clear sky"),
-        1: ("🌤️", "Mainly clear"),
-        2: ("⛅", "Partly cloudy"),
-        3: ("☁️", "Overcast"),
-        45: ("🌫️", "Fog"),
-        48: ("🌫️", "Depositing rime fog"),
-        51: ("🌦️", "Light drizzle"),
-        53: ("🌦️", "Moderate drizzle"),
-        55: ("🌧️", "Dense drizzle"),
-        56: ("🌧️", "Freezing drizzle (light)"),
-        57: ("🌧️", "Freezing drizzle (dense)"),
-        61: ("🌧️", "Slight rain"),
-        63: ("🌧️", "Moderate rain"),
-        65: ("🌧️", "Heavy rain"),
-        66: ("🌧️", "Freezing rain (light)"),
-        67: ("🌧️", "Freezing rain (heavy)"),
-        71: ("🌨️", "Slight snow"),
-        73: ("🌨️", "Moderate snow"),
-        75: ("❄️", "Heavy snow"),
-        77: ("🌨️", "Snow grains"),
-        80: ("🌦️", "Slight rain showers"),
-        81: ("🌧️", "Moderate rain showers"),
-        82: ("🌧️", "Violent rain showers"),
-        85: ("🌨️", "Slight snow showers"),
-        86: ("🌨️", "Heavy snow showers"),
-        95: ("⛈️", "Thunderstorm"),
-        96: ("⛈️", "Thunderstorm with slight hail"),
-        99: ("⛈️", "Thunderstorm with heavy hail"),
-    }
-
-    return weather_mapping.get(weather_code, ("❓", f"Unknown (code {weather_code})"))
 
 
 @st.cache_data(ttl=3600)  # Cache for 1 hour
@@ -162,24 +121,6 @@ def get_forecast_cached(latitude: float, longitude: float, forecast_days: int) -
     )
 
 
-@st.cache_data(ttl=600)  # Cache for 10 minutes
-def get_current_conditions_cached(latitude: float, longitude: float) -> dict[str, float | int | None]:
-    """Fetch and cache current weather conditions including temperature and weather code.
-
-    Args:
-        latitude: Location latitude coordinate
-        longitude: Location longitude coordinate
-
-    Returns:
-        Dictionary with current conditions: temperature_2m, relative_humidity_2m, weather_code, time
-
-    Raises:
-        httpx.HTTPError: If API request fails
-    """
-    client = OpenMeteoClient()
-    return client.get_current_conditions(latitude=latitude, longitude=longitude)
-
-
 _GSP_REGIONS: dict[str, str] = {
     "A": "A - South East England",
     "B": "B - East Midlands",
@@ -196,6 +137,107 @@ _GSP_REGIONS: dict[str, str] = {
     "N": "N - South Scotland",
     "P": "P - North Scotland",
 }
+
+
+GSP_REGIONS_GEOJSON = Path(__file__).parent / "data" / "gsp_regions.geojson"
+
+UK_MAP_HEIGHT = 450
+# Approximate rendered width of the map column, used to pick a zoom level that fits the selected region
+UK_MAP_ASSUMED_WIDTH = 650
+MAP_TILE_SIZE = 512
+MAP_ZOOM_PADDING = 0.3
+
+
+@st.cache_data
+def load_gsp_regions() -> dict:
+    """Load the GSP group boundaries (one feature per region letter) as GeoJSON."""
+    return json.loads(GSP_REGIONS_GEOJSON.read_text())
+
+
+def _feature_bounds(feature: dict) -> tuple[float, float, float, float]:
+    """Return (min_lon, min_lat, max_lon, max_lat) of a Polygon or MultiPolygon feature."""
+    polygons = feature["geometry"]["coordinates"]
+    if feature["geometry"]["type"] == "Polygon":
+        polygons = [polygons]
+    points = [point for polygon in polygons for ring in polygon for point in ring]
+    lons = [point[0] for point in points]
+    lats = [point[1] for point in points]
+    return min(lons), min(lats), max(lons), max(lats)
+
+
+def _map_view_for_bounds(bounds: tuple[float, float, float, float]) -> tuple[dict[str, float], float]:
+    """Compute a map centre and zoom level that fit the given (min_lon, min_lat, max_lon, max_lat) box."""
+    min_lon, min_lat, max_lon, max_lat = bounds
+
+    def mercator_y(lat: float) -> float:
+        return math.log(math.tan(math.pi / 4 + math.radians(lat) / 2))
+
+    x_fraction = (max_lon - min_lon) / 360
+    y_fraction = (mercator_y(max_lat) - mercator_y(min_lat)) / (2 * math.pi)
+    zoom = min(
+        math.log2(UK_MAP_ASSUMED_WIDTH / (MAP_TILE_SIZE * x_fraction)),
+        math.log2(UK_MAP_HEIGHT / (MAP_TILE_SIZE * y_fraction)),
+    )
+    centre_y = (mercator_y(max_lat) + mercator_y(min_lat)) / 2
+    centre_lat = math.degrees(2 * math.atan(math.exp(centre_y)) - math.pi / 2)
+    return {"lat": centre_lat, "lon": (min_lon + max_lon) / 2}, zoom - MAP_ZOOM_PADDING
+
+
+def build_location_map(location: Location, gsp: str) -> go.Figure:
+    """Build a map of GSP region boundaries, zoomed to and highlighting the selected region, with a location marker."""
+    gsp_regions = load_gsp_regions()
+    gsp_letters = [feature["properties"]["gsp"] for feature in gsp_regions["features"]]
+    selected_feature = next(feature for feature in gsp_regions["features"] if feature["properties"]["gsp"] == gsp)
+    centre, zoom = _map_view_for_bounds(_feature_bounds(selected_feature))
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Choroplethmap(
+            geojson=gsp_regions,
+            featureidkey="properties.gsp",
+            locations=gsp_letters,
+            z=[0] * len(gsp_letters),
+            colorscale=[[0, "rgba(70, 130, 180, 0.15)"], [1, "rgba(70, 130, 180, 0.15)"]],
+            showscale=False,
+            marker={"line": {"color": "steelblue", "width": 1}},
+            text=[_GSP_REGIONS[letter] for letter in gsp_letters],
+            hovertemplate="%{text}<extra></extra>",
+            name="Grid Supply Points",
+        )
+    )
+    # Selected region drawn on top with a stronger fill and outline
+    fig.add_trace(
+        go.Choroplethmap(
+            geojson={"type": "FeatureCollection", "features": [selected_feature]},
+            featureidkey="properties.gsp",
+            locations=[gsp],
+            z=[0],
+            colorscale=[[0, "rgba(70, 130, 180, 0.35)"], [1, "rgba(70, 130, 180, 0.35)"]],
+            showscale=False,
+            marker={"line": {"color": "navy", "width": 3}},
+            text=[_GSP_REGIONS[gsp]],
+            hovertemplate="%{text}<extra></extra>",
+            name="Selected Grid Supply Point",
+        )
+    )
+    fig.add_trace(
+        go.Scattermap(
+            lat=[location.latitude],
+            lon=[location.longitude],
+            mode="markers",
+            marker={"size": 12, "color": "crimson"},
+            text=[location.city],
+            hovertemplate="%{text}<extra></extra>",
+            name="Location",
+        )
+    )
+    fig.update_layout(
+        map={"style": "carto-positron", "center": centre, "zoom": zoom},
+        height=UK_MAP_HEIGHT,
+        margin={"l": 0, "r": 0, "t": 0, "b": 0},
+        showlegend=False,
+    )
+    return fig
 
 
 AGILE_PRODUCT_CODE = "AGILE-24-10-01"
@@ -1145,11 +1187,8 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
         forecast_days: Number of days to forecast
         gsp: Grid Supply Point region letter used for electricity price forecasts
     """
-    # Fetch current conditions and forecast data upfront
+    # Fetch forecast data upfront
     try:
-        with st.spinner("Loading current conditions..."):
-            current = get_current_conditions_cached(location.latitude, location.longitude)
-
         with st.spinner(f"Loading {forecast_days}-day forecast..."):
             forecast = get_forecast_cached(location.latitude, location.longitude, forecast_days)
     except Exception as e:  # noqa: BLE001
@@ -1161,119 +1200,36 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
 
     # Tab 1: Current Conditions
     with tab1:
-        # Main layout: Map (50%) | Metrics Grid (50%)
+        # Main layout: Map (50%) | Location (50%)
         col_left, col_right = st.columns([1, 1])
 
-        # Left column: Map with fixed height to match 2x2 grid
+        # Left column: map zoomed to the selected GSP region
         with col_left:
-            map_data = pd.DataFrame({"lat": [location.latitude], "lon": [location.longitude]})
-            # Wrap map in a container with height matching the 2x2 grid (2 * 150px panels + spacing)
+            st.plotly_chart(build_location_map(location, gsp), use_container_width=True)
+
+        # Right column: Location box with border
+        with col_right:
+            state_html = (
+                f'<p style="font-size: 0.9em; font-style: italic; margin: 5px 0;">{location.state}</p>'
+                if location.state
+                else ""
+            )
             st.markdown(
-                """
-                <style>
-                .map-container iframe {
-                    height: 320px !important;
-                }
-                </style>
+                f"""
+                <div style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 20px;
+                            text-align: center; height: 180px; display: flex;
+                            flex-direction: column; justify-content: center;">
+                    <p style="font-size: 1.2em; font-weight: bold; margin: 5px 0;">{location.city}</p>
+                    <p style="font-size: 1em; margin: 5px 0;">{location.country}</p>
+                    {state_html}
+                    <p style="font-size: 0.8em; color: #666; margin: 5px 0;">
+                        {location.latitude:.4f}, {location.longitude:.4f}
+                    </p>
+                    <p style="font-size: 0.9em; margin: 5px 0;">Grid Supply Point: {_GSP_REGIONS[gsp]}</p>
+                </div>
                 """,
                 unsafe_allow_html=True,
             )
-            st.map(map_data, zoom=10, height=320)
-
-        # Right column: 2x2 Grid of metrics with borders
-        with col_right:
-            # Top row: Location and Humidity
-            row1_col1, row1_col2 = st.columns([1, 1])
-
-            with row1_col1:
-                # Location box with border
-                state_html = (
-                    f'<p style="font-size: 0.9em; font-style: italic; margin: 5px 0;">{location.state}</p>'
-                    if location.state
-                    else ""
-                )
-                st.markdown(
-                    f"""
-                    <div style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 20px;
-                                text-align: center; height: 150px; display: flex;
-                                flex-direction: column; justify-content: center;">
-                        <p style="font-size: 1.2em; font-weight: bold; margin: 5px 0;">{location.city}</p>
-                        <p style="font-size: 1em; margin: 5px 0;">{location.country}</p>
-                        {state_html}
-                        <p style="font-size: 0.8em; color: #666; margin: 5px 0;">
-                            {location.latitude:.4f}, {location.longitude:.4f}
-                        </p>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-            with row1_col2:
-                # Humidity box with border
-                humidity = current.get("relative_humidity_2m", "N/A")
-                humidity_value = f"{humidity}%" if humidity != "N/A" else "N/A"
-                st.markdown(
-                    f"""
-                    <div style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 20px;
-                                text-align: center; height: 150px; display: flex;
-                                flex-direction: column; justify-content: center;">
-                        <p style="font-size: 0.9em; color: #666; margin: 5px 0;">💧 Humidity</p>
-                        <p style="font-size: 2em; font-weight: bold; margin: 5px 0;">{humidity_value}</p>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-            # Add vertical spacing to match horizontal column gap
-            st.markdown("<div style='margin: 0.5rem 0;'></div>", unsafe_allow_html=True)
-
-            # Bottom row: Temperature and Weather
-            row2_col1, row2_col2 = st.columns([1, 1])
-
-            with row2_col1:
-                # Temperature box with border
-                temperature = current.get("temperature_2m", "N/A")
-                temp_value = f"{temperature}°C" if temperature != "N/A" else "N/A"
-                st.markdown(
-                    f"""
-                    <div style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 20px;
-                                text-align: center; height: 150px; display: flex;
-                                flex-direction: column; justify-content: center;">
-                        <p style="font-size: 0.9em; color: #666; margin: 5px 0;">🌡️ Temperature</p>
-                        <p style="font-size: 2em; font-weight: bold; margin: 5px 0;">{temp_value}</p>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-            with row2_col2:
-                # Weather icon and description box with border
-                weather_code = current.get("weather_code")
-                if weather_code is not None:
-                    icon, description = get_weather_icon_and_description(int(weather_code))
-                    st.markdown(
-                        f"""
-                        <div style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 20px;
-                                    text-align: center; height: 150px; display: flex;
-                                    flex-direction: column; justify-content: center;">
-                            <p style="font-size: 3em; margin: 5px 0;">{icon}</p>
-                            <p style="font-size: 1em; font-weight: bold; margin: 5px 0;">{description}</p>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown(
-                        """
-                        <div style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 20px;
-                                    text-align: center; height: 150px; display: flex;
-                                    flex-direction: column; justify-content: center;">
-                            <p style="font-size: 0.9em; color: #666; margin: 5px 0;">☁️ Weather</p>
-                            <p style="font-size: 2em; font-weight: bold; margin: 5px 0;">N/A</p>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
 
     # Tab 2: Forecast
     with tab2:
@@ -1320,6 +1276,22 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
         display_optimisation_tab(forecast, forecast_days, gsp)
 
 
+def select_gsp_manually() -> str:
+    """Show a Grid Supply Point selector for locations outside every GSP region."""
+    st.subheader("⚙️ Grid Supply Point")
+    st.warning("This location is outside the Grid Supply Point regions. Choose one for electricity prices.")
+    gsp = st.selectbox(
+        "Grid Supply Point",
+        options=list(_GSP_REGIONS.keys()),
+        format_func=lambda k: _GSP_REGIONS[k],
+        index=6,  # Default: G - North West England
+        help="UK Grid Supply Point region for Agile electricity price forecasts",
+        label_visibility="collapsed",
+    )
+    st.divider()
+    return gsp
+
+
 def main() -> None:
     """Main Streamlit application."""
     # Header
@@ -1350,19 +1322,8 @@ def main() -> None:
 
         st.divider()
 
-        # Forecast settings
-        st.subheader("⚙️ Grid Supply Point")
-
-        gsp = st.selectbox(
-            "Grid Supply Point",
-            options=list(_GSP_REGIONS.keys()),
-            format_func=lambda k: _GSP_REGIONS[k],
-            index=6,  # Default: G - North West England
-            help="UK Grid Supply Point region for Agile electricity price forecasts",
-            label_visibility="collapsed",
-        )
-
-        st.divider()
+        # Filled in below only if the GSP cannot be found from the location
+        gsp_fallback_container = st.container()
 
         st.subheader("⚙️ Forecast Duration")
 
@@ -1395,6 +1356,10 @@ def main() -> None:
 
     # Display weather data if location is available
     if location:
+        gsp = find_gsp(location.latitude, location.longitude, load_gsp_regions())
+        if gsp is None:
+            with gsp_fallback_container:
+                gsp = select_gsp_manually()
         display_weather_data(location, forecast_days, gsp)
 
 
