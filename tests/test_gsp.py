@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dehumidifier_adviser.gsp import find_gsp
+from dehumidifier_adviser.gsp import LocationOutsideGridSupplyAreaError, find_gsp, require_gsp
 
 GSP_REGIONS = json.loads((Path(__file__).parent.parent / "data" / "gsp_regions.geojson").read_text())
 
@@ -45,3 +45,14 @@ def test_find_gsp_for_uk_cities(place: str, latitude: float, longitude: float, e
 def test_find_gsp_outside_regions(place: str, latitude: float, longitude: float) -> None:
     """Locations outside Great Britain have no GSP region."""
     assert find_gsp(latitude, longitude, GSP_REGIONS) is None, place
+
+
+def test_require_gsp_returns_region_inside_gb() -> None:
+    """require_gsp returns the region letter for a location in Great Britain."""
+    assert require_gsp(51.5074, -0.1278, GSP_REGIONS) == "C"
+
+
+def test_require_gsp_raises_outside_gb() -> None:
+    """require_gsp raises for a location outside Great Britain."""
+    with pytest.raises(LocationOutsideGridSupplyAreaError, match="England, Scotland and Wales"):
+        require_gsp(59.9139, 10.7522, GSP_REGIONS)

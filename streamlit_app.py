@@ -22,7 +22,7 @@ from dehumidifier_adviser import (
     LocationNotFoundError,
     OpenMeteoClient,
 )
-from dehumidifier_adviser.gsp import find_gsp
+from dehumidifier_adviser.gsp import LocationOutsideGridSupplyAreaError, require_gsp
 from dehumidifier_adviser.models import MergedEnergyForecast
 from dehumidifier_adviser.scenarios import SCENARIO_FACTORIES
 from humidity_simulator_client import (
@@ -45,7 +45,6 @@ from octopus_energy_uk_api import AgileRatesTimeSeries, OctopusEnergyClient, Oct
 # Page configuration
 st.set_page_config(
     page_title="Tørk",
-    page_icon="🌧️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -70,13 +69,12 @@ SIMULATOR_API_KEY = os.environ.get("SIMULATOR_API_KEY")
 
 
 @st.cache_data(ttl=3600)  # Cache for 1 hour
-def get_location_cached(city: str, country: str, state: str | None) -> Location:
+def get_location_cached(city: str, country: str) -> Location:
     """Fetch and cache location data from geocoding API.
 
     Args:
         city: City name
         country: Country name
-        state: Optional state/region name
 
     Returns:
         Location object with coordinates and address details
@@ -86,7 +84,7 @@ def get_location_cached(city: str, country: str, state: str | None) -> Location:
         GeocodingServiceError: If service is unavailable
     """
     geocoder = Geocoder()
-    return geocoder.forward_geocode(city=city, country=country, state=state)
+    return geocoder.forward_geocode(city=city, country=country)
 
 
 @st.cache_data(ttl=1800)  # Cache for 30 minutes
@@ -363,102 +361,6 @@ def build_merged_energy_forecast(gsp: str, forecast_days: int) -> MergedEnergyFo
     )
 
 
-def plot_merged_electricity_prices(merged_forecast: MergedEnergyForecast) -> None:
-    """Create and display a half-hourly electricity price chart from merged actual/forecast data.
-
-    Mirrors the price panel shown on the Optimisation tab: solid line for actual (Octopus)
-    prices, dashed line with a shaded p10/p90 band for forecast (Agile Predict) prices.
-
-    Args:
-        merged_forecast: MergedEnergyForecast with actual and forecast price slices
-    """
-    fig = go.Figure()
-
-    if merged_forecast.actual_timestamps:
-        fig.add_trace(
-            go.Scatter(
-                x=merged_forecast.actual_timestamps,
-                y=merged_forecast.actual_values,
-                name="Octopus Agile Pricing (actual)",
-                line={"color": "steelblue", "width": 1.5},
-                mode="lines+markers",
-                marker={"size": 4},
-            )
-        )
-
-    if merged_forecast.forecast_timestamps:
-        if merged_forecast.forecast_values_low and merged_forecast.forecast_values_high:
-            band_x = list(merged_forecast.forecast_timestamps) + list(reversed(merged_forecast.forecast_timestamps))
-            band_y = list(merged_forecast.forecast_values_high) + list(reversed(merged_forecast.forecast_values_low))
-            fig.add_trace(
-                go.Scatter(
-                    x=band_x,
-                    y=band_y,
-                    fill="toself",
-                    fillcolor="rgba(70, 130, 180, 0.15)",
-                    line={"width": 0},
-                    mode="lines",
-                    showlegend=False,
-                    hoverinfo="skip",
-                )
-            )
-
-        fig.add_trace(
-            go.Scatter(
-                x=merged_forecast.forecast_timestamps,
-                y=merged_forecast.forecast_values,
-                name="Agile Predict (forecast)",
-                line={"color": "steelblue", "width": 1.5, "dash": "dash"},
-                mode="lines+markers",
-                marker={"size": 4},
-            )
-        )
-
-    fig.update_layout(
-        title="Agile Electricity Price Forecast",
-        xaxis_title="Time",
-        yaxis_title="Price (p/kWh inc VAT)",
-        hovermode="x unified",
-        template="plotly_white",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def plot_hourly_humidity(forecast: HumidityForecast) -> None:
-    """Create and display hourly humidity line chart.
-
-    Args:
-        forecast: HumidityForecast object containing hourly data
-    """
-    if forecast.hourly is None:
-        st.warning("⚠️ No hourly data available")
-        return
-
-    # Convert polars DataFrame to pandas for Plotly compatibility
-    df = forecast.hourly.to_dataframe().to_pandas()
-
-    # Create interactive line chart
-    fig = px.line(
-        df,
-        x="time",
-        y="relative_humidity_2m",
-        title="Hourly Relative Humidity Forecast",
-        labels={"time": "Time", "relative_humidity_2m": "Relative Humidity (%)"},
-        markers=True,
-    )
-
-    # Customize layout
-    fig.update_layout(
-        hovermode="x unified",
-        yaxis_range=[0, 100],  # Humidity is 0-100%
-        template="plotly_white",
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-
-
 def plot_daily_humidity(forecast: HumidityForecast) -> None:
     """Create and display daily humidity chart with min/max error bars.
 
@@ -466,7 +368,7 @@ def plot_daily_humidity(forecast: HumidityForecast) -> None:
         forecast: HumidityForecast object containing daily data
     """
     if forecast.daily is None:
-        st.warning("⚠️ No daily data available")
+        st.warning("No daily data available")
         return
 
     # Convert polars DataFrame to pandas for Plotly compatibility
@@ -506,42 +408,6 @@ def plot_daily_humidity(forecast: HumidityForecast) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def plot_hourly_temperature(forecast: HumidityForecast) -> None:
-    """Create and display hourly temperature line chart.
-
-    Args:
-        forecast: HumidityForecast object containing hourly data
-    """
-    if forecast.hourly is None:
-        st.warning("⚠️ No hourly data available")
-        return
-
-    # Convert polars DataFrame to pandas for Plotly compatibility
-    df = forecast.hourly.to_dataframe().to_pandas()
-
-    if "temperature_2m" not in df.columns:
-        st.warning("⚠️ No temperature data available")
-        return
-
-    # Create interactive line chart
-    fig = px.line(
-        df,
-        x="time",
-        y="temperature_2m",
-        title="Hourly Temperature Forecast",
-        labels={"time": "Time", "temperature_2m": "Temperature (°C)"},
-        markers=True,
-    )
-
-    # Customize layout
-    fig.update_layout(
-        hovermode="x unified",
-        template="plotly_white",
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-
-
 def plot_daily_temperature(forecast: HumidityForecast) -> None:
     """Create and display daily temperature chart with min/max error bars.
 
@@ -549,14 +415,14 @@ def plot_daily_temperature(forecast: HumidityForecast) -> None:
         forecast: HumidityForecast object containing daily data
     """
     if forecast.daily is None:
-        st.warning("⚠️ No daily data available")
+        st.warning("No daily data available")
         return
 
     # Convert polars DataFrame to pandas for Plotly compatibility
     df = forecast.daily.to_dataframe().to_pandas()
 
     if "temperature_2m_mean" not in df.columns:
-        st.warning("⚠️ No temperature data available")
+        st.warning("No temperature data available")
         return
 
     # Calculate error bars (distance from mean to min/max)
@@ -855,7 +721,7 @@ def _run_optimisation(
         with st.spinner("Running baseline simulation..."):
             baseline_rh = client.simulate(_baseline_simulation_request(request)).relative_humidity
     except SimulatorConnectionError as e:
-        st.error(f"❌ {e}")
+        st.error(f"{e}")
         return
     except SimulatorError as e:
         st.warning(f"Baseline simulation failed — chart will not show unoptimised line: {e}")
@@ -864,7 +730,7 @@ def _run_optimisation(
         with st.spinner("Running optimisation..."):
             result = client.optimise(request)
     except SimulatorConnectionError as e:
-        st.error(f"❌ {e}")
+        st.error(f"{e}")
         return
     except SimulatorError as e:
         st.error(f"Optimisation error: {e}")
@@ -918,22 +784,152 @@ def _trim_source_to_future(source: HumiditySource) -> HumiditySource:
     )
 
 
+# Defaults for the Configuration tab widgets; also used before that tab has rendered on first load
+_ROOM_DEFAULTS: dict[str, float] = {
+    "cfg_surface_area": 65.0,
+    "cfg_ceiling_height": 2.5,
+    "cfg_temperature": 22.0,
+    "cfg_starting_rh": 50,
+    "cfg_ach": 0.5,
+}
+
+
+def _room_setting(key: str) -> float:
+    return st.session_state.get(key, _ROOM_DEFAULTS[key])
+
+
+def _build_room_simulation_request(forecast: HumidityForecast, forecast_days: int) -> SimulationRequest | None:
+    """Build a no-dehumidifier simulation request from the forecast and the Configuration tab settings.
+
+    Returns:
+        The request, or None if the forecast is missing hourly humidity or temperature
+    """
+    if (
+        forecast.hourly is None
+        or forecast.hourly.relative_humidity_2m is None
+        or forecast.hourly.temperature_2m is None
+    ):
+        return None
+
+    hourly_times, hourly_rh, hourly_temp = _trim_ambient_to_future(
+        forecast.hourly.time,
+        forecast.hourly.relative_humidity_2m,
+        forecast.hourly.temperature_2m,
+        forecast.timezone,
+    )
+
+    ambient_conditions = AmbientConditions(
+        name="External Conditions",
+        timestamps=[t.strftime("%Y-%m-%d %H:%M") for t in hourly_times],
+        timestamp_format="%Y-%m-%d %H:%M",
+        timezone=forecast.timezone,
+        relative_humidity=hourly_rh,
+        ambient_temperature=hourly_temp,
+        ambient_temperature_unit="Celcius",
+    )
+
+    scenario_name = st.session_state.get("cfg_scenario", next(iter(SCENARIO_FACTORIES.keys())))
+    sources = [
+        _trim_source_to_future(s)
+        for s in SCENARIO_FACTORIES[scenario_name](pd.Timestamp.now().normalize(), forecast_days)
+    ]
+
+    return SimulationRequest(
+        surface_area=_room_setting("cfg_surface_area"),
+        surface_area_unit="m2",
+        ceiling_height=_room_setting("cfg_ceiling_height"),
+        ceiling_height_unit="m",
+        internal_temperature=_room_setting("cfg_temperature"),
+        internal_temperature_unit="c",
+        air_changes_per_hour=_room_setting("cfg_ach"),
+        starting_relative_humidity=float(_room_setting("cfg_starting_rh")),
+        sources=sources,
+        external_ambient_conditions=ambient_conditions,
+    )
+
+
+@st.cache_data(ttl=1800)  # Cache for 30 minutes
+def simulate_room_cached(request_json: str) -> SimulationResult:
+    """Run (and cache) a no-dehumidifier simulation for a JSON-serialised SimulationRequest."""
+    client = HumiditySimulatorClient(base_url=SIMULATOR_API_URL, api_key=SIMULATOR_API_KEY)
+    return client.simulate(SimulationRequest.model_validate_json(request_json))
+
+
+HUMIDITY_CHART_HEIGHT = 400
+
+
+def build_humidity_forecast_plot(ambient: AmbientConditions, internal: SimulationResult | None) -> go.Figure:
+    """Plot the external humidity forecast alongside the simulated internal humidity (no dehumidifier)."""
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=pd.to_datetime(ambient.timestamps, format=ambient.timestamp_format),
+            y=ambient.relative_humidity,
+            name="External",
+            line={"color": "gray", "width": 1.5},
+        )
+    )
+    if internal is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=pd.to_datetime(internal.timestamps),
+                y=internal.relative_humidity,
+                name="Internal",
+                line={"color": "steelblue", "width": 2},
+            )
+        )
+    fig.update_layout(
+        title="Relative Humidity Forecast",
+        xaxis_title="Time",
+        yaxis_title="Relative Humidity (%)",
+        yaxis_range=[0, 100],
+        hovermode="x unified",
+        template="plotly_white",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
+        height=HUMIDITY_CHART_HEIGHT,
+    )
+    return fig
+
+
+def display_humidity_forecast(forecast: HumidityForecast, forecast_days: int) -> None:
+    """Display external and simulated internal humidity for the configured room, excluding humidity sources."""
+    request = _build_room_simulation_request(forecast, forecast_days)
+    if request is None:
+        st.warning("Forecast data is missing hourly humidity or temperature")
+        return
+
+    # Zero the source emissions rather than dropping the sources: the simulator returns an empty
+    # result when given no sources, and the sources' timestamps define the simulated period.
+    request = request.model_copy(
+        update={"sources": [s.model_copy(update={"values": [0.0] * len(s.values)}) for s in request.sources]}
+    )
+
+    internal: SimulationResult | None = None
+    try:
+        with st.spinner("Simulating internal humidity..."):
+            internal = simulate_room_cached(request.model_dump_json())
+    except SimulatorError as e:
+        st.warning(f"Could not simulate internal humidity: {e}")
+
+    st.plotly_chart(
+        build_humidity_forecast_plot(request.external_ambient_conditions, internal), use_container_width=True
+    )
+    st.caption('Internal humidity is representative of the room defined in "Configuration" without any interference.')
+
+
 def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp: str) -> None:
     """Display the optimisation tab — reads configuration from session state set in Configuration tab."""
     if st.button("Run Optimisation", use_container_width=True, type="primary"):
-        if (
-            forecast.hourly is None
-            or forecast.hourly.relative_humidity_2m is None
-            or forecast.hourly.temperature_2m is None
-        ):
-            st.error("❌ Forecast data is missing hourly humidity or temperature — cannot run optimisation.")
+        simulation_request = _build_room_simulation_request(forecast, forecast_days)
+        if simulation_request is None:
+            st.error("Forecast data is missing hourly humidity or temperature — cannot run optimisation.")
             return
 
         try:
             with st.spinner("Loading electricity prices..."):
                 merged_forecast = build_merged_energy_forecast(gsp=gsp, forecast_days=forecast_days)
         except AgilePredictError as e:
-            st.error(f"❌ Could not load electricity prices: {e}")
+            st.error(f"Could not load electricity prices: {e}")
             return
 
         if merged_forecast.actual_timestamps:
@@ -947,40 +943,8 @@ def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp
                 "(Octopus actual prices unavailable)."
             )
 
-        hourly_times, hourly_rh, hourly_temp = _trim_ambient_to_future(
-            forecast.hourly.time,
-            forecast.hourly.relative_humidity_2m,
-            forecast.hourly.temperature_2m,
-            forecast.timezone,
-        )
-
-        ambient_conditions = AmbientConditions(
-            name="External Conditions",
-            timestamps=[t.strftime("%Y-%m-%d %H:%M") for t in hourly_times],
-            timestamp_format="%Y-%m-%d %H:%M",
-            timezone=forecast.timezone,
-            relative_humidity=hourly_rh,
-            ambient_temperature=hourly_temp,
-            ambient_temperature_unit="Celcius",
-        )
-
-        scenario_name = st.session_state.get("cfg_scenario", next(iter(SCENARIO_FACTORIES.keys())))
-        sources = [
-            _trim_source_to_future(s)
-            for s in SCENARIO_FACTORIES[scenario_name](pd.Timestamp.now().normalize(), forecast_days)
-        ]
-
         request = OptimisationRequest(
-            surface_area=st.session_state.get("cfg_surface_area", 20.0),
-            surface_area_unit="m2",
-            ceiling_height=st.session_state.get("cfg_ceiling_height", 2.5),
-            ceiling_height_unit="m",
-            internal_temperature=st.session_state.get("cfg_temperature", 20.0),
-            internal_temperature_unit="c",
-            air_changes_per_hour=st.session_state.get("cfg_ach", 0.5),
-            starting_relative_humidity=float(st.session_state.get("cfg_starting_rh", 50)),
-            sources=sources,
-            external_ambient_conditions=ambient_conditions,
+            **simulation_request.model_dump(),
             energy_forecast=merged_forecast.combined,
             dehumidifier=DehumidifierSpec(
                 name=st.session_state.get("cfg_dh_name", "Dehumidifier"),
@@ -997,8 +961,8 @@ def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp
 _SCENARIO_DESCRIPTIONS: dict[str, str] = {
     "1 Bed Flat": (
         "Single occupant flat.\n\n"
-        "- **Breathing** (80 g/h) continuously on weekdays and weekend mornings until noon\n"
-        "- **Shower** (1,200 g/h, 30 min) at 07:00 on weekdays and 09:00 on weekends\n"
+        "- **Occupancy** (80 g/h) continuously on weekdays and weekend mornings until noon\n"
+        "- **Showering** (1,200 g/h, 30 min) at 07:00 on weekdays and 09:00 on weekends\n"
         "- **Cooking** (600 g/h, 1 hr) on weekday evenings 18:00\u201319:00"
     ),
 }
@@ -1013,7 +977,7 @@ def display_configuration_tab() -> None:
             "Surface Area (m\u00b2)",
             min_value=1.0,
             max_value=500.0,
-            value=65.0,
+            value=_ROOM_DEFAULTS["cfg_surface_area"],
             step=1.0,
             key="cfg_surface_area",
         )
@@ -1021,7 +985,7 @@ def display_configuration_tab() -> None:
             "Ceiling Height (m)",
             min_value=1.0,
             max_value=10.0,
-            value=2.5,
+            value=_ROOM_DEFAULTS["cfg_ceiling_height"],
             step=0.1,
             key="cfg_ceiling_height",
         )
@@ -1029,7 +993,7 @@ def display_configuration_tab() -> None:
             "Room Temperature (\u00b0C)",
             min_value=-10.0,
             max_value=50.0,
-            value=22.0,
+            value=_ROOM_DEFAULTS["cfg_temperature"],
             step=0.5,
             key="cfg_temperature",
         )
@@ -1037,14 +1001,14 @@ def display_configuration_tab() -> None:
             "Starting Relative Humidity (%)",
             min_value=0,
             max_value=100,
-            value=50,
+            value=_ROOM_DEFAULTS["cfg_starting_rh"],
             key="cfg_starting_rh",
         )
         st.number_input(
             "Air Changes per Hour (ACH)",
             min_value=0.1,
             max_value=10.0,
-            value=0.5,
+            value=_ROOM_DEFAULTS["cfg_ach"],
             step=0.1,
             key="cfg_ach",
         )
@@ -1143,22 +1107,21 @@ def get_location_to_display() -> Location | None:
         loc_input = st.session_state.location_input
 
         try:
-            with st.spinner("🌍 Finding location..."):
-                return get_location_cached(loc_input["city"], loc_input["country"], loc_input["state"])
+            with st.spinner("Finding location..."):
+                return get_location_cached(loc_input["city"], loc_input["country"])
 
         except LocationNotFoundError:
             st.error(
-                f"🔍 **Location not found:** '{loc_input['city']}, {loc_input['country']}'\n\n"
+                f"**Location not found:** '{loc_input['city']}, {loc_input['country']}'\n\n"
                 "**Suggestions:**\n"
                 "- Check spelling of city and country names\n"
-                "- Try using full country name (e.g., 'United Kingdom' not 'UK')\n"
-                "- Add state/region for disambiguation (e.g., 'New York' state for 'New York' city)"
+                "- Try using full country name (e.g., 'United Kingdom' not 'UK')"
             )
             return None
 
         except GeocodingServiceError as e:
             st.error(
-                f"🌐 **Geocoding service error:** {e}\n\n"
+                f"**Geocoding service error:** {e}\n\n"
                 "**Possible causes:**\n"
                 "- Network connectivity issues\n"
                 "- Service temporarily unavailable\n"
@@ -1172,11 +1135,24 @@ def get_location_to_display() -> Location | None:
             return None
 
         except Exception as e:  # noqa: BLE001
-            st.error(f"❌ **Unexpected error:** {e}\n\nPlease try again or contact support if the issue persists.")
+            st.error(f"**Unexpected error:** {e}\n\nPlease try again or contact support if the issue persists.")
             return None
 
     # Use default location on initial page load
     return DEFAULT_LOCATION
+
+
+def display_location_box(location: Location) -> None:
+    """Display the selected location's city and country in a bordered box."""
+    st.markdown(
+        f"""
+        <div style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 12px; text-align: center;">
+            <p style="font-size: 1.2em; font-weight: bold; margin: 5px 0;">{location.city}</p>
+            <p style="font-size: 1em; margin: 5px 0;">{location.country}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def display_weather_data(location: Location, forecast_days: int, gsp: str) -> None:
@@ -1192,140 +1168,69 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
         with st.spinner(f"Loading {forecast_days}-day forecast..."):
             forecast = get_forecast_cached(location.latitude, location.longitude, forecast_days)
     except Exception as e:  # noqa: BLE001
-        st.error(f"❌ **Weather data error:** {e}")
+        st.error(f"**Weather data error:** {e}")
         return
 
-    # Create tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["Current Conditions", "Forecast", "Configuration", "Optimisation"])
+    tab_optimisation, tab_configuration = st.tabs(["Optimisation", "Configuration"])
 
-    # Tab 1: Current Conditions
-    with tab1:
-        # Main layout: Map (50%) | Location (50%)
-        col_left, col_right = st.columns([1, 1])
+    with tab_optimisation:
+        # Humidity forecast on the left, map on the right
+        col_forecasts, col_map = st.columns([3, 2])
 
-        # Left column: map zoomed to the selected GSP region
-        with col_left:
+        # Each chart sits in its own bordered box
+        with col_forecasts, st.container(border=True):
+            display_humidity_forecast(forecast, forecast_days)
+
+        with col_map, st.container(border=True):
             st.plotly_chart(build_location_map(location, gsp), use_container_width=True)
 
-        # Right column: Location box with border
-        with col_right:
-            state_html = (
-                f'<p style="font-size: 0.9em; font-style: italic; margin: 5px 0;">{location.state}</p>'
-                if location.state
-                else ""
-            )
-            st.markdown(
-                f"""
-                <div style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 20px;
-                            text-align: center; height: 180px; display: flex;
-                            flex-direction: column; justify-content: center;">
-                    <p style="font-size: 1.2em; font-weight: bold; margin: 5px 0;">{location.city}</p>
-                    <p style="font-size: 1em; margin: 5px 0;">{location.country}</p>
-                    {state_html}
-                    <p style="font-size: 0.8em; color: #666; margin: 5px 0;">
-                        {location.latitude:.4f}, {location.longitude:.4f}
-                    </p>
-                    <p style="font-size: 0.9em; margin: 5px 0;">Grid Supply Point: {_GSP_REGIONS[gsp]}</p>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+        with st.container(border=True):
+            display_optimisation_tab(forecast, forecast_days, gsp)
 
-    # Tab 2: Forecast
-    with tab2:
-        forecast_type = st.selectbox(
-            "Forecast Type",
-            options=["Humidity", "Temperature", "Electricity Price"],
-            index=0,
-            help="Select which metric to display in the forecast",
-            key="forecast_type_select",
-        )
-
-        st.divider()
-
-        # Display appropriate chart based on forecast type
-        if forecast_type == "Humidity":
-            plot_hourly_humidity(forecast)
-        elif forecast_type == "Temperature":
-            plot_hourly_temperature(forecast)
-        else:  # Electricity Price
-            try:
-                with st.spinner("Loading electricity prices..."):
-                    merged_forecast = build_merged_energy_forecast(gsp=gsp, forecast_days=forecast_days)
-            except AgilePredictError as e:
-                st.warning(f"Could not load electricity prices: {e}")
-            else:
-                if merged_forecast.actual_timestamps:
-                    st.caption(
-                        f"Using {len(merged_forecast.actual_timestamps)} actual price slots from Octopus Energy "
-                        f"and {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict."
-                    )
-                else:
-                    st.caption(
-                        f"Using {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict "
-                        "(Octopus actual prices unavailable)."
-                    )
-                plot_merged_electricity_prices(merged_forecast)
-
-    # Tab 3: Configuration
-    with tab3:
+    with tab_configuration:
         display_configuration_tab()
-
-    # Tab 4: Optimisation
-    with tab4:
-        display_optimisation_tab(forecast, forecast_days, gsp)
-
-
-def select_gsp_manually() -> str:
-    """Show a Grid Supply Point selector for locations outside every GSP region."""
-    st.subheader("⚙️ Grid Supply Point")
-    st.warning("This location is outside the Grid Supply Point regions. Choose one for electricity prices.")
-    gsp = st.selectbox(
-        "Grid Supply Point",
-        options=list(_GSP_REGIONS.keys()),
-        format_func=lambda k: _GSP_REGIONS[k],
-        index=6,  # Default: G - North West England
-        help="UK Grid Supply Point region for Agile electricity price forecasts",
-        label_visibility="collapsed",
-    )
-    st.divider()
-    return gsp
 
 
 def main() -> None:
     """Main Streamlit application."""
     # Header
     st.title("Tørk")
-    st.markdown("Optimise your bills, optimise your drying, optimise your dehumidifier!")
+    st.markdown(
+        "The indoor environment and dehumidifiers can be managed to provide demand-side flexibility. "
+        "This offers cost savings to consumers and load shifting for the grid.\n\n"
+        "Run an optimisation to see how a forecast-aware dehumidifier controller might behave."
+    )
 
     # Sidebar with location input and settings
     with st.sidebar:
         # Location input form
         with st.form("location_form"):
-            st.subheader("🔍 Weather Forecast Location")
+            st.subheader("Location Input")
 
             city = st.text_input("City", placeholder="e.g., London")
-            country = st.text_input("Country", placeholder="e.g., United Kingdom")
-            state = st.text_input("State/Region (Optional)", placeholder="e.g., England")
+            country = st.text_input(
+                "Country",
+                placeholder="e.g., United Kingdom",
+                help="Only locations in England, Scotland and Wales are supported",
+            )
 
             submit = st.form_submit_button("Get Forecast", use_container_width=True)
 
             if submit:
                 if not city or not country:
-                    st.error("❌ Please enter both city and country")
+                    st.error("Please enter both city and country")
                 else:
                     st.session_state.location_input = {
                         "city": city.strip(),
                         "country": country.strip(),
-                        "state": state.strip() if state else None,
                     }
 
         st.divider()
 
-        # Filled in below only if the GSP cannot be found from the location
-        gsp_fallback_container = st.container()
+        # Filled in below once the location has been resolved
+        location_container = st.container()
 
-        st.subheader("⚙️ Forecast Duration")
+        st.subheader("Forecast Duration")
 
         forecast_days = st.slider(
             "Forecast Duration (days)",
@@ -1356,10 +1261,19 @@ def main() -> None:
 
     # Display weather data if location is available
     if location:
-        gsp = find_gsp(location.latitude, location.longitude, load_gsp_regions())
-        if gsp is None:
-            with gsp_fallback_container:
-                gsp = select_gsp_manually()
+        try:
+            gsp = require_gsp(location.latitude, location.longitude, load_gsp_regions())
+        except LocationOutsideGridSupplyAreaError:
+            st.error(
+                f"**Location not supported:** '{location.city}, {location.country}' is outside Great Britain.\n\n"
+                "Electricity prices are only available for England, Scotland and Wales. "
+                "Please enter a location there."
+            )
+            return
+        with location_container:
+            st.subheader("Current Location")
+            display_location_box(location)
+            st.divider()
         display_weather_data(location, forecast_days, gsp)
 
 
