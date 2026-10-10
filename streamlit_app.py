@@ -363,7 +363,7 @@ def build_merged_energy_forecast(gsp: str, forecast_days: int) -> MergedEnergyFo
     )
 
 
-def plot_merged_electricity_prices(merged_forecast: MergedEnergyForecast) -> None:
+def plot_merged_electricity_prices(merged_forecast: MergedEnergyForecast, height: int | None = None) -> None:
     """Create and display a half-hourly electricity price chart from merged actual/forecast data.
 
     Mirrors the price panel shown on the Optimisation tab: solid line for actual (Octopus)
@@ -371,6 +371,7 @@ def plot_merged_electricity_prices(merged_forecast: MergedEnergyForecast) -> Non
 
     Args:
         merged_forecast: MergedEnergyForecast with actual and forecast price slices
+        height: Optional chart height in pixels
     """
     fig = go.Figure()
 
@@ -421,16 +422,18 @@ def plot_merged_electricity_prices(merged_forecast: MergedEnergyForecast) -> Non
         hovermode="x unified",
         template="plotly_white",
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
+        height=height,
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
 
-def plot_hourly_humidity(forecast: HumidityForecast) -> None:
+def plot_hourly_humidity(forecast: HumidityForecast, height: int | None = None) -> None:
     """Create and display hourly humidity line chart.
 
     Args:
         forecast: HumidityForecast object containing hourly data
+        height: Optional chart height in pixels
     """
     if forecast.hourly is None:
         st.warning("⚠️ No hourly data available")
@@ -454,6 +457,7 @@ def plot_hourly_humidity(forecast: HumidityForecast) -> None:
         hovermode="x unified",
         yaxis_range=[0, 100],  # Humidity is 0-100%
         template="plotly_white",
+        height=height,
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -506,11 +510,12 @@ def plot_daily_humidity(forecast: HumidityForecast) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def plot_hourly_temperature(forecast: HumidityForecast) -> None:
+def plot_hourly_temperature(forecast: HumidityForecast, height: int | None = None) -> None:
     """Create and display hourly temperature line chart.
 
     Args:
         forecast: HumidityForecast object containing hourly data
+        height: Optional chart height in pixels
     """
     if forecast.hourly is None:
         st.warning("⚠️ No hourly data available")
@@ -537,6 +542,7 @@ def plot_hourly_temperature(forecast: HumidityForecast) -> None:
     fig.update_layout(
         hovermode="x unified",
         template="plotly_white",
+        height=height,
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -1179,6 +1185,56 @@ def get_location_to_display() -> Location | None:
     return DEFAULT_LOCATION
 
 
+FORECAST_CHART_HEIGHT = 300
+
+
+def display_electricity_price_forecast(gsp: str, forecast_days: int) -> None:
+    """Load and display the merged actual/forecast electricity price chart."""
+    try:
+        with st.spinner("Loading electricity prices..."):
+            merged_forecast = build_merged_energy_forecast(gsp=gsp, forecast_days=forecast_days)
+    except AgilePredictError as e:
+        st.warning(f"Could not load electricity prices: {e}")
+        return
+
+    plot_merged_electricity_prices(merged_forecast, height=FORECAST_CHART_HEIGHT)
+    if merged_forecast.actual_timestamps:
+        st.caption(
+            f"Using {len(merged_forecast.actual_timestamps)} actual price slots from Octopus Energy "
+            f"and {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict."
+        )
+    else:
+        st.caption(
+            f"Using {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict "
+            "(Octopus actual prices unavailable)."
+        )
+
+
+def display_location_box(location: Location, gsp: str) -> None:
+    """Display the selected location and its Grid Supply Point in a bordered box."""
+    state_html = (
+        f'<p style="font-size: 0.9em; font-style: italic; margin: 5px 0;">{location.state}</p>'
+        if location.state
+        else ""
+    )
+    st.markdown(
+        f"""
+        <div style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 20px;
+                    text-align: center; height: 180px; display: flex;
+                    flex-direction: column; justify-content: center;">
+            <p style="font-size: 1.2em; font-weight: bold; margin: 5px 0;">{location.city}</p>
+            <p style="font-size: 1em; margin: 5px 0;">{location.country}</p>
+            {state_html}
+            <p style="font-size: 0.8em; color: #666; margin: 5px 0;">
+                {location.latitude:.4f}, {location.longitude:.4f}
+            </p>
+            <p style="font-size: 0.9em; margin: 5px 0;">Grid Supply Point: {_GSP_REGIONS[gsp]}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def display_weather_data(location: Location, forecast_days: int, gsp: str) -> None:
     """Display weather data for the given location.
 
@@ -1195,85 +1251,31 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
         st.error(f"❌ **Weather data error:** {e}")
         return
 
-    # Create tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["Current Conditions", "Forecast", "Configuration", "Optimisation"])
+    tab_optimisation, tab_configuration = st.tabs(["Optimisation", "Configuration"])
 
-    # Tab 1: Current Conditions
-    with tab1:
-        # Main layout: Map (50%) | Location (50%)
-        col_left, col_right = st.columns([1, 1])
+    with tab_optimisation:
+        # Forecasts on the left, map and location on the right
+        col_forecasts, col_map = st.columns([3, 2])
 
-        # Left column: map zoomed to the selected GSP region
-        with col_left:
-            st.plotly_chart(build_location_map(location, gsp), use_container_width=True)
+        # Each chart sits in its own bordered box
+        with col_forecasts:
+            with st.container(border=True):
+                plot_hourly_humidity(forecast, height=FORECAST_CHART_HEIGHT)
+            with st.container(border=True):
+                plot_hourly_temperature(forecast, height=FORECAST_CHART_HEIGHT)
+            with st.container(border=True):
+                display_electricity_price_forecast(gsp, forecast_days)
 
-        # Right column: Location box with border
-        with col_right:
-            state_html = (
-                f'<p style="font-size: 0.9em; font-style: italic; margin: 5px 0;">{location.state}</p>'
-                if location.state
-                else ""
-            )
-            st.markdown(
-                f"""
-                <div style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 20px;
-                            text-align: center; height: 180px; display: flex;
-                            flex-direction: column; justify-content: center;">
-                    <p style="font-size: 1.2em; font-weight: bold; margin: 5px 0;">{location.city}</p>
-                    <p style="font-size: 1em; margin: 5px 0;">{location.country}</p>
-                    {state_html}
-                    <p style="font-size: 0.8em; color: #666; margin: 5px 0;">
-                        {location.latitude:.4f}, {location.longitude:.4f}
-                    </p>
-                    <p style="font-size: 0.9em; margin: 5px 0;">Grid Supply Point: {_GSP_REGIONS[gsp]}</p>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+        with col_map:
+            with st.container(border=True):
+                st.plotly_chart(build_location_map(location, gsp), use_container_width=True)
+            display_location_box(location, gsp)
 
-    # Tab 2: Forecast
-    with tab2:
-        forecast_type = st.selectbox(
-            "Forecast Type",
-            options=["Humidity", "Temperature", "Electricity Price"],
-            index=0,
-            help="Select which metric to display in the forecast",
-            key="forecast_type_select",
-        )
+        with st.container(border=True):
+            display_optimisation_tab(forecast, forecast_days, gsp)
 
-        st.divider()
-
-        # Display appropriate chart based on forecast type
-        if forecast_type == "Humidity":
-            plot_hourly_humidity(forecast)
-        elif forecast_type == "Temperature":
-            plot_hourly_temperature(forecast)
-        else:  # Electricity Price
-            try:
-                with st.spinner("Loading electricity prices..."):
-                    merged_forecast = build_merged_energy_forecast(gsp=gsp, forecast_days=forecast_days)
-            except AgilePredictError as e:
-                st.warning(f"Could not load electricity prices: {e}")
-            else:
-                if merged_forecast.actual_timestamps:
-                    st.caption(
-                        f"Using {len(merged_forecast.actual_timestamps)} actual price slots from Octopus Energy "
-                        f"and {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict."
-                    )
-                else:
-                    st.caption(
-                        f"Using {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict "
-                        "(Octopus actual prices unavailable)."
-                    )
-                plot_merged_electricity_prices(merged_forecast)
-
-    # Tab 3: Configuration
-    with tab3:
+    with tab_configuration:
         display_configuration_tab()
-
-    # Tab 4: Optimisation
-    with tab4:
-        display_optimisation_tab(forecast, forecast_days, gsp)
 
 
 def select_gsp_manually() -> str:
