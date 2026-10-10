@@ -21,18 +21,8 @@ uv sync
 uv run streamlit run streamlit_app.py
 ```
 
-The dashboard opens at `http://localhost:8501`. The room simulation and optimisation need a running humidity-simulator
-API; point the app at it with environment variables:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `SIMULATOR_API_URL` | `http://localhost:8000` | Base URL of the humidity-simulator API |
-| `SIMULATOR_API_KEY` | _(none)_ | API key, if the API requires one |
-
-## Deployment
-
-The app is hosted on [Streamlit Community Cloud](https://streamlit.io/cloud) from the `main` branch, and talks to the
-humidity-simulator API on Azure Functions.
+The room simulation and optimisation need the humidity-simulator API running in Docker. See the
+[humidity-simulator](https://github.com/joarsolvang/humidity-simulator) repository for instructions on how to spin it up.
 
 ## Development
 
