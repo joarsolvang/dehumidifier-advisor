@@ -363,106 +363,6 @@ def build_merged_energy_forecast(gsp: str, forecast_days: int) -> MergedEnergyFo
     )
 
 
-def plot_merged_electricity_prices(merged_forecast: MergedEnergyForecast, height: int | None = None) -> None:
-    """Create and display a half-hourly electricity price chart from merged actual/forecast data.
-
-    Mirrors the price panel shown on the Optimisation tab: solid line for actual (Octopus)
-    prices, dashed line with a shaded p10/p90 band for forecast (Agile Predict) prices.
-
-    Args:
-        merged_forecast: MergedEnergyForecast with actual and forecast price slices
-        height: Optional chart height in pixels
-    """
-    fig = go.Figure()
-
-    if merged_forecast.actual_timestamps:
-        fig.add_trace(
-            go.Scatter(
-                x=merged_forecast.actual_timestamps,
-                y=merged_forecast.actual_values,
-                name="Octopus Agile Pricing (actual)",
-                line={"color": "steelblue", "width": 1.5},
-                mode="lines+markers",
-                marker={"size": 4},
-            )
-        )
-
-    if merged_forecast.forecast_timestamps:
-        if merged_forecast.forecast_values_low and merged_forecast.forecast_values_high:
-            band_x = list(merged_forecast.forecast_timestamps) + list(reversed(merged_forecast.forecast_timestamps))
-            band_y = list(merged_forecast.forecast_values_high) + list(reversed(merged_forecast.forecast_values_low))
-            fig.add_trace(
-                go.Scatter(
-                    x=band_x,
-                    y=band_y,
-                    fill="toself",
-                    fillcolor="rgba(70, 130, 180, 0.15)",
-                    line={"width": 0},
-                    mode="lines",
-                    showlegend=False,
-                    hoverinfo="skip",
-                )
-            )
-
-        fig.add_trace(
-            go.Scatter(
-                x=merged_forecast.forecast_timestamps,
-                y=merged_forecast.forecast_values,
-                name="Agile Predict (forecast)",
-                line={"color": "steelblue", "width": 1.5, "dash": "dash"},
-                mode="lines+markers",
-                marker={"size": 4},
-            )
-        )
-
-    fig.update_layout(
-        title="Agile Electricity Price Forecast",
-        xaxis_title="Time",
-        yaxis_title="Price (p/kWh inc VAT)",
-        hovermode="x unified",
-        template="plotly_white",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
-        height=height,
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def plot_hourly_humidity(forecast: HumidityForecast, height: int | None = None) -> None:
-    """Create and display hourly humidity line chart.
-
-    Args:
-        forecast: HumidityForecast object containing hourly data
-        height: Optional chart height in pixels
-    """
-    if forecast.hourly is None:
-        st.warning("⚠️ No hourly data available")
-        return
-
-    # Convert polars DataFrame to pandas for Plotly compatibility
-    df = forecast.hourly.to_dataframe().to_pandas()
-
-    # Create interactive line chart
-    fig = px.line(
-        df,
-        x="time",
-        y="relative_humidity_2m",
-        title="Hourly Relative Humidity Forecast",
-        labels={"time": "Time", "relative_humidity_2m": "Relative Humidity (%)"},
-        markers=True,
-    )
-
-    # Customize layout
-    fig.update_layout(
-        hovermode="x unified",
-        yaxis_range=[0, 100],  # Humidity is 0-100%
-        template="plotly_white",
-        height=height,
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-
-
 def plot_daily_humidity(forecast: HumidityForecast) -> None:
     """Create and display daily humidity chart with min/max error bars.
 
@@ -505,44 +405,6 @@ def plot_daily_humidity(forecast: HumidityForecast) -> None:
         hovermode="x unified",
         yaxis_range=[0, 100],  # Humidity is 0-100%
         template="plotly_white",
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def plot_hourly_temperature(forecast: HumidityForecast, height: int | None = None) -> None:
-    """Create and display hourly temperature line chart.
-
-    Args:
-        forecast: HumidityForecast object containing hourly data
-        height: Optional chart height in pixels
-    """
-    if forecast.hourly is None:
-        st.warning("⚠️ No hourly data available")
-        return
-
-    # Convert polars DataFrame to pandas for Plotly compatibility
-    df = forecast.hourly.to_dataframe().to_pandas()
-
-    if "temperature_2m" not in df.columns:
-        st.warning("⚠️ No temperature data available")
-        return
-
-    # Create interactive line chart
-    fig = px.line(
-        df,
-        x="time",
-        y="temperature_2m",
-        title="Hourly Temperature Forecast",
-        labels={"time": "Time", "temperature_2m": "Temperature (°C)"},
-        markers=True,
-    )
-
-    # Customize layout
-    fig.update_layout(
-        hovermode="x unified",
-        template="plotly_white",
-        height=height,
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -924,14 +786,144 @@ def _trim_source_to_future(source: HumiditySource) -> HumiditySource:
     )
 
 
+# Defaults for the Configuration tab widgets; also used before that tab has rendered on first load
+_ROOM_DEFAULTS: dict[str, float] = {
+    "cfg_surface_area": 65.0,
+    "cfg_ceiling_height": 2.5,
+    "cfg_temperature": 22.0,
+    "cfg_starting_rh": 50,
+    "cfg_ach": 0.5,
+}
+
+
+def _room_setting(key: str) -> float:
+    return st.session_state.get(key, _ROOM_DEFAULTS[key])
+
+
+def _build_room_simulation_request(forecast: HumidityForecast, forecast_days: int) -> SimulationRequest | None:
+    """Build a no-dehumidifier simulation request from the forecast and the Configuration tab settings.
+
+    Returns:
+        The request, or None if the forecast is missing hourly humidity or temperature
+    """
+    if (
+        forecast.hourly is None
+        or forecast.hourly.relative_humidity_2m is None
+        or forecast.hourly.temperature_2m is None
+    ):
+        return None
+
+    hourly_times, hourly_rh, hourly_temp = _trim_ambient_to_future(
+        forecast.hourly.time,
+        forecast.hourly.relative_humidity_2m,
+        forecast.hourly.temperature_2m,
+        forecast.timezone,
+    )
+
+    ambient_conditions = AmbientConditions(
+        name="External Conditions",
+        timestamps=[t.strftime("%Y-%m-%d %H:%M") for t in hourly_times],
+        timestamp_format="%Y-%m-%d %H:%M",
+        timezone=forecast.timezone,
+        relative_humidity=hourly_rh,
+        ambient_temperature=hourly_temp,
+        ambient_temperature_unit="Celcius",
+    )
+
+    scenario_name = st.session_state.get("cfg_scenario", next(iter(SCENARIO_FACTORIES.keys())))
+    sources = [
+        _trim_source_to_future(s)
+        for s in SCENARIO_FACTORIES[scenario_name](pd.Timestamp.now().normalize(), forecast_days)
+    ]
+
+    return SimulationRequest(
+        surface_area=_room_setting("cfg_surface_area"),
+        surface_area_unit="m2",
+        ceiling_height=_room_setting("cfg_ceiling_height"),
+        ceiling_height_unit="m",
+        internal_temperature=_room_setting("cfg_temperature"),
+        internal_temperature_unit="c",
+        air_changes_per_hour=_room_setting("cfg_ach"),
+        starting_relative_humidity=float(_room_setting("cfg_starting_rh")),
+        sources=sources,
+        external_ambient_conditions=ambient_conditions,
+    )
+
+
+@st.cache_data(ttl=1800)  # Cache for 30 minutes
+def simulate_room_cached(request_json: str) -> SimulationResult:
+    """Run (and cache) a no-dehumidifier simulation for a JSON-serialised SimulationRequest."""
+    client = HumiditySimulatorClient(base_url=SIMULATOR_API_URL, api_key=SIMULATOR_API_KEY)
+    return client.simulate(SimulationRequest.model_validate_json(request_json))
+
+
+HUMIDITY_CHART_HEIGHT = 400
+
+
+def build_humidity_forecast_plot(ambient: AmbientConditions, internal: SimulationResult | None) -> go.Figure:
+    """Plot the external humidity forecast alongside the simulated internal humidity (no dehumidifier)."""
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=pd.to_datetime(ambient.timestamps, format=ambient.timestamp_format),
+            y=ambient.relative_humidity,
+            name="External",
+            line={"color": "gray", "width": 1.5},
+        )
+    )
+    if internal is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=pd.to_datetime(internal.timestamps),
+                y=internal.relative_humidity,
+                name="Internal",
+                line={"color": "steelblue", "width": 2},
+            )
+        )
+    fig.update_layout(
+        title="Relative Humidity Forecast",
+        xaxis_title="Time",
+        yaxis_title="Relative Humidity (%)",
+        yaxis_range=[0, 100],
+        hovermode="x unified",
+        template="plotly_white",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
+        height=HUMIDITY_CHART_HEIGHT,
+    )
+    return fig
+
+
+def display_humidity_forecast(forecast: HumidityForecast, forecast_days: int) -> None:
+    """Display external and simulated internal humidity for the configured room, excluding humidity sources."""
+    request = _build_room_simulation_request(forecast, forecast_days)
+    if request is None:
+        st.warning("⚠️ Forecast data is missing hourly humidity or temperature")
+        return
+
+    # Zero the source emissions rather than dropping the sources: the simulator returns an empty
+    # result when given no sources, and the sources' timestamps define the simulated period.
+    request = request.model_copy(
+        update={"sources": [s.model_copy(update={"values": [0.0] * len(s.values)}) for s in request.sources]}
+    )
+
+    internal: SimulationResult | None = None
+    try:
+        with st.spinner("Simulating internal humidity..."):
+            internal = simulate_room_cached(request.model_dump_json())
+    except SimulatorError as e:
+        st.warning(f"Could not simulate internal humidity: {e}")
+
+    st.plotly_chart(
+        build_humidity_forecast_plot(request.external_ambient_conditions, internal), use_container_width=True
+    )
+    st.caption('Internal humidity is representative of the room defined in "Configuration" without any interference.')
+
+
 def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp: str) -> None:
     """Display the optimisation tab — reads configuration from session state set in Configuration tab."""
     if st.button("Run Optimisation", use_container_width=True, type="primary"):
-        if (
-            forecast.hourly is None
-            or forecast.hourly.relative_humidity_2m is None
-            or forecast.hourly.temperature_2m is None
-        ):
+        simulation_request = _build_room_simulation_request(forecast, forecast_days)
+        if simulation_request is None:
             st.error("❌ Forecast data is missing hourly humidity or temperature — cannot run optimisation.")
             return
 
@@ -953,40 +945,8 @@ def display_optimisation_tab(forecast: HumidityForecast, forecast_days: int, gsp
                 "(Octopus actual prices unavailable)."
             )
 
-        hourly_times, hourly_rh, hourly_temp = _trim_ambient_to_future(
-            forecast.hourly.time,
-            forecast.hourly.relative_humidity_2m,
-            forecast.hourly.temperature_2m,
-            forecast.timezone,
-        )
-
-        ambient_conditions = AmbientConditions(
-            name="External Conditions",
-            timestamps=[t.strftime("%Y-%m-%d %H:%M") for t in hourly_times],
-            timestamp_format="%Y-%m-%d %H:%M",
-            timezone=forecast.timezone,
-            relative_humidity=hourly_rh,
-            ambient_temperature=hourly_temp,
-            ambient_temperature_unit="Celcius",
-        )
-
-        scenario_name = st.session_state.get("cfg_scenario", next(iter(SCENARIO_FACTORIES.keys())))
-        sources = [
-            _trim_source_to_future(s)
-            for s in SCENARIO_FACTORIES[scenario_name](pd.Timestamp.now().normalize(), forecast_days)
-        ]
-
         request = OptimisationRequest(
-            surface_area=st.session_state.get("cfg_surface_area", 20.0),
-            surface_area_unit="m2",
-            ceiling_height=st.session_state.get("cfg_ceiling_height", 2.5),
-            ceiling_height_unit="m",
-            internal_temperature=st.session_state.get("cfg_temperature", 20.0),
-            internal_temperature_unit="c",
-            air_changes_per_hour=st.session_state.get("cfg_ach", 0.5),
-            starting_relative_humidity=float(st.session_state.get("cfg_starting_rh", 50)),
-            sources=sources,
-            external_ambient_conditions=ambient_conditions,
+            **simulation_request.model_dump(),
             energy_forecast=merged_forecast.combined,
             dehumidifier=DehumidifierSpec(
                 name=st.session_state.get("cfg_dh_name", "Dehumidifier"),
@@ -1019,7 +979,7 @@ def display_configuration_tab() -> None:
             "Surface Area (m\u00b2)",
             min_value=1.0,
             max_value=500.0,
-            value=65.0,
+            value=_ROOM_DEFAULTS["cfg_surface_area"],
             step=1.0,
             key="cfg_surface_area",
         )
@@ -1027,7 +987,7 @@ def display_configuration_tab() -> None:
             "Ceiling Height (m)",
             min_value=1.0,
             max_value=10.0,
-            value=2.5,
+            value=_ROOM_DEFAULTS["cfg_ceiling_height"],
             step=0.1,
             key="cfg_ceiling_height",
         )
@@ -1035,7 +995,7 @@ def display_configuration_tab() -> None:
             "Room Temperature (\u00b0C)",
             min_value=-10.0,
             max_value=50.0,
-            value=22.0,
+            value=_ROOM_DEFAULTS["cfg_temperature"],
             step=0.5,
             key="cfg_temperature",
         )
@@ -1043,14 +1003,14 @@ def display_configuration_tab() -> None:
             "Starting Relative Humidity (%)",
             min_value=0,
             max_value=100,
-            value=50,
+            value=_ROOM_DEFAULTS["cfg_starting_rh"],
             key="cfg_starting_rh",
         )
         st.number_input(
             "Air Changes per Hour (ACH)",
             min_value=0.1,
             max_value=10.0,
-            value=0.5,
+            value=_ROOM_DEFAULTS["cfg_ach"],
             step=0.1,
             key="cfg_ach",
         )
@@ -1185,31 +1145,6 @@ def get_location_to_display() -> Location | None:
     return DEFAULT_LOCATION
 
 
-FORECAST_CHART_HEIGHT = 300
-
-
-def display_electricity_price_forecast(gsp: str, forecast_days: int) -> None:
-    """Load and display the merged actual/forecast electricity price chart."""
-    try:
-        with st.spinner("Loading electricity prices..."):
-            merged_forecast = build_merged_energy_forecast(gsp=gsp, forecast_days=forecast_days)
-    except AgilePredictError as e:
-        st.warning(f"Could not load electricity prices: {e}")
-        return
-
-    plot_merged_electricity_prices(merged_forecast, height=FORECAST_CHART_HEIGHT)
-    if merged_forecast.actual_timestamps:
-        st.caption(
-            f"Using {len(merged_forecast.actual_timestamps)} actual price slots from Octopus Energy "
-            f"and {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict."
-        )
-    else:
-        st.caption(
-            f"Using {len(merged_forecast.forecast_timestamps)} forecast slots from Agile Predict "
-            "(Octopus actual prices unavailable)."
-        )
-
-
 def display_location_box(location: Location, gsp: str) -> None:
     """Display the selected location and its Grid Supply Point in a bordered box."""
     state_html = (
@@ -1254,17 +1189,12 @@ def display_weather_data(location: Location, forecast_days: int, gsp: str) -> No
     tab_optimisation, tab_configuration = st.tabs(["Optimisation", "Configuration"])
 
     with tab_optimisation:
-        # Forecasts on the left, map and location on the right
+        # Humidity forecast on the left, map and location on the right
         col_forecasts, col_map = st.columns([3, 2])
 
         # Each chart sits in its own bordered box
-        with col_forecasts:
-            with st.container(border=True):
-                plot_hourly_humidity(forecast, height=FORECAST_CHART_HEIGHT)
-            with st.container(border=True):
-                plot_hourly_temperature(forecast, height=FORECAST_CHART_HEIGHT)
-            with st.container(border=True):
-                display_electricity_price_forecast(gsp, forecast_days)
+        with col_forecasts, st.container(border=True):
+            display_humidity_forecast(forecast, forecast_days)
 
         with col_map:
             with st.container(border=True):
