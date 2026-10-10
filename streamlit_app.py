@@ -1351,10 +1351,10 @@ def main() -> None:
         st.divider()
 
         # Forecast settings
-        st.subheader("⚙️ Electricity Region (GSP)")
+        st.subheader("⚙️ Grid Supply Point")
 
         gsp = st.selectbox(
-            "Electricity Region (GSP)",
+            "Grid Supply Point",
             options=list(_GSP_REGIONS.keys()),
             format_func=lambda k: _GSP_REGIONS[k],
             index=6,  # Default: G - North West England
