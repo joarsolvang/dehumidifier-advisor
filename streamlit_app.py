@@ -119,21 +119,21 @@ def get_forecast_cached(latitude: float, longitude: float, forecast_days: int) -
     )
 
 
-_GSP_REGIONS: dict[str, str] = {
-    "A": "A - South East England",
-    "B": "B - East Midlands",
-    "C": "C - East England",
-    "D": "D - Merseyside & North Wales",
-    "E": "E - West Midlands",
-    "F": "F - North East England",
-    "G": "G - North West England",
-    "H": "H - Southern England",
-    "J": "J - South East England (second zone)",
-    "K": "K - South Wales",
-    "L": "L - South West England",
-    "M": "M - Yorkshire",
-    "N": "N - South Scotland",
-    "P": "P - North Scotland",
+GSP_REGIONS_DNO: dict[str, str] = {
+    "A": "UK Power Networks (Eastern)",
+    "B": "National Grid Electricity Distribution (East Midlands)",
+    "C": "UK Power Networks (London)",
+    "D": "SP Energy Networks (Manweb)",
+    "E": "National Grid Electricity Distribution (West Midlands)",
+    "F": "Northern Powergrid (Northeast)",
+    "G": "Electricity North West",
+    "H": "Scottish & Southern Electricity Networks (Southern)",
+    "J": "UK Power Networks (South Eastern)",
+    "K": "National Grid Electricity Distribution (South Wales)",
+    "L": "National Grid Electricity Distribution (South West)",
+    "M": "Northern Powergrid (Yorkshire)",
+    "N": "SP Energy Networks (South Scotland)",
+    "P": "Scottish & Southern Electricity Networks (Hydro)",
 }
 
 
@@ -198,7 +198,7 @@ def build_location_map(location: Location, gsp: str) -> go.Figure:
             colorscale=[[0, "rgba(70, 130, 180, 0.15)"], [1, "rgba(70, 130, 180, 0.15)"]],
             showscale=False,
             marker={"line": {"color": "steelblue", "width": 1}},
-            text=[_GSP_REGIONS[letter] for letter in gsp_letters],
+            text=[f"{letter} - {GSP_REGIONS_DNO[letter]}" for letter in gsp_letters],
             hovertemplate="%{text}<extra></extra>",
             name="Grid Supply Points",
         )
@@ -213,7 +213,7 @@ def build_location_map(location: Location, gsp: str) -> go.Figure:
             colorscale=[[0, "rgba(70, 130, 180, 0.35)"], [1, "rgba(70, 130, 180, 0.35)"]],
             showscale=False,
             marker={"line": {"color": "navy", "width": 3}},
-            text=[_GSP_REGIONS[gsp]],
+            text=[f"{gsp} - {GSP_REGIONS_DNO[gsp]}"],
             hovertemplate="%{text}<extra></extra>",
             name="Selected Grid Supply Point",
         )
@@ -1142,13 +1142,13 @@ def get_location_to_display() -> Location | None:
     return DEFAULT_LOCATION
 
 
-def display_location_box(location: Location) -> None:
-    """Display the selected location's city and country in a bordered box."""
+def display_location_box(location: Location, gsp: str) -> None:
+    """Display the selected location's city and Grid Supply Point DNO in a bordered box."""
     st.markdown(
         f"""
         <div style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 12px; text-align: center;">
             <p style="font-size: 1.2em; font-weight: bold; margin: 5px 0;">{location.city}</p>
-            <p style="font-size: 1em; margin: 5px 0;">{location.country}</p>
+            <p style="font-size: 1em; margin: 5px 0;">{GSP_REGIONS_DNO[gsp]}</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1236,7 +1236,7 @@ def main() -> None:
             "Forecast Duration (days)",
             min_value=1,
             max_value=16,
-            value=7,
+            value=3,
             help="Number of days to forecast (API limit: 1-16)",
             label_visibility="collapsed",
         )
@@ -1271,8 +1271,7 @@ def main() -> None:
             )
             return
         with location_container:
-            st.subheader("Current Location")
-            display_location_box(location)
+            display_location_box(location, gsp)
             st.divider()
         display_weather_data(location, forecast_days, gsp)
 
