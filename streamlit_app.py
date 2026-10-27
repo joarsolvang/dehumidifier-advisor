@@ -1236,7 +1236,7 @@ def main() -> None:
             "Forecast Duration (days)",
             min_value=1,
             max_value=16,
-            value=7,
+            value=3,
             help="Number of days to forecast (API limit: 1-16)",
             label_visibility="collapsed",
         )
